@@ -1,0 +1,44 @@
+# Dependencies and generated frontend assets.
+node_modules/
+/public/assets/
+
+# Local service state, caches, and logs.
+/.run/
+/.cache/
+/.npm/
+*.log
+*.log.*
+*.pid
+*.pid.lock
+
+# Test reports and coverage.
+/test-results/
+/playwright-report/
+/blob-report/
+/coverage/
+
+# Local environment values; keep shareable templates trackable.
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Private exports in the scanned project root. Keep tests/fixtures trackable.
+/codex-session-*.md
+/codex-session-*.markdown
+/codex-session-*.txt
+/codex-session-*.jsonl
+/rollout-*.jsonl
+
+# Editor, OS, and temporary files.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+*.tmp
+*.temp
