@@ -2,7 +2,7 @@ import './styles.css';
 import { activityText, findMatches, groupMessages, MAX_FILE_BYTES, messagePreview, parseConversation } from './parser.js';
 import { escapeHTML, highlightMatches, renderMarkdown } from './markdown.js';
 import { icon } from './icons.js';
-import { deleteCachedSession, findCachedSession, readCacheIndex, readCachedText, saveCachedSession, sessionId } from './session-cache.js';
+import { deleteCachedSession, findCachedSession, planSessionUpdate, readCacheIndex, readCachedText, saveCachedSession, sessionId, sessionNames } from './session-cache.js';
 import { formatSessionTime, sessionStartTime } from './session-time.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -55,13 +55,16 @@ $('#app').innerHTML = `
           <nav id="outline" class="outline" aria-label="跳转到对话"></nav>
         </section>
       </div>
-      <div class="sidebar-bottom"><span class="local-status"><span class="status-dot"></span>本地工作区</span><button class="icon-button" id="theme-toggle" aria-label="切换深色模式" title="切换深色模式"></button></div>
+      <div class="sidebar-bottom"><span class="local-status"><span class="status-dot"></span>本地工作区</span></div>
       <div class="privacy-note">${icon('shield')}<span>文件在本机读取，安心回看。</span></div>
     </aside>
     <div class="workspace">
       <header class="topbar">
         <div class="breadcrumb"><button class="icon-button mobile-menu" id="menu-toggle" aria-label="打开侧栏" aria-expanded="false">${icon('menu')}</button><span class="breadcrumb-icon">${icon('folder')}</span><span>工作区</span><span class="breadcrumb-slash">/</span><strong>会话阅读器</strong></div>
-        <span class="local-badge"><span class="status-dot"></span>LOCAL</span>
+        <div class="topbar-actions">
+          <span class="local-badge"><span class="status-dot"></span>LOCAL</span>
+          <button class="theme-toggle" id="theme-toggle" type="button" aria-label="切换深色模式" title="切换深色模式"></button>
+        </div>
       </header>
       <div class="reader-toolbar">
         <div class="search-box">${icon('search')}<input type="search" id="search-input" placeholder="搜索此会话…" aria-label="搜索此会话" autocomplete="off" spellcheck="false" /><kbd id="search-shortcut">Ctrl K</kbd><div class="search-controls" id="search-controls" hidden><span id="search-count" role="status" aria-live="polite"></span><button class="icon-button small" id="search-prev" title="上一条匹配 · Shift+Enter" aria-label="上一条匹配">${icon('up')}</button><button class="icon-button small" id="search-next" title="下一条匹配 · Enter" aria-label="下一条匹配">${icon('down')}</button><button class="icon-button small" id="search-clear" title="清除搜索" aria-label="清除搜索">${icon('close')}</button></div></div>
@@ -115,8 +118,9 @@ function setSidebar(open) {
 }
 function updateTheme() {
   document.documentElement.dataset.theme = state.theme;
-  $('#theme-toggle').innerHTML = icon(state.theme === 'dark' ? 'sun' : 'moon');
-  const label = state.theme === 'dark' ? '切换浅色模式' : '切换深色模式';
+  const nextTheme = state.theme === 'dark' ? '浅色模式' : '深色模式';
+  $('#theme-toggle').innerHTML = `${icon(state.theme === 'dark' ? 'sun' : 'moon')}<span>${nextTheme}</span>`;
+  const label = `切换${nextTheme}`;
   $('#theme-toggle').setAttribute('aria-label', label);
   $('#theme-toggle').title = label;
 }
@@ -164,7 +168,11 @@ function rebuildLibrary() {
     const sameVersion = link?.size === directory.size && link?.modifiedAt === directory.modifiedAt;
     if (sameVersion && state.removedIds.has(link.id)) continue;
     const cached = sameVersion ? state.cachedSessions.get(link.id) : undefined;
-    const session = { ...(cached || { id: `directory:${directory.name}` }), ...directory, directory, source: 'directory' };
+    // An uploaded replacement takes precedence over an unchanged directory
+    // copy. Keep its actual size and avoid re-reading older bytes on refresh.
+    const session = cached && link.imported
+      ? { ...cached, source: cached.cached ? 'cache' : 'temporary' }
+      : { ...(cached || { id: `directory:${directory.name}` }), ...directory, directory, source: 'directory' };
     if (!sessions.has(session.id)) sessions.set(session.id, session);
   }
   const cached = [...state.cachedSessions.values()].sort((a, b) => b.savedAt - a.savedAt || a.name.localeCompare(b.name));
@@ -462,20 +470,40 @@ async function restoreCache() {
 }
 
 async function rememberSession({ id, name, size, text, directory, restore = false }) {
-  let metadata;
+  let result;
+  let cached = true;
+  const matches = [...state.cachedSessions.values()].filter((session) => sessionNames(session).includes(name));
+  const memoryUpdate = planSessionUpdate({ id, name, size }, state.cachedSessions.get(id), matches);
+  const importDirectory = restore ? state.directoryFiles.find((file) => file.name === name) : undefined;
   try {
-    metadata = { ...await saveCachedSession({ id, name, size, text, directory, restore }), cached: true };
+    result = await saveCachedSession({ id, name, size, text, directory, importDirectory, restore });
     temporaryTexts.delete(id);
   } catch (error) {
-    if (error.code === 'SESSION_DELETED') throw error;
-    metadata = { id, name, size, savedAt: Date.now(), cached: false };
+    if (['SESSION_DELETED', 'SESSION_UPDATED'].includes(error.code)) throw error;
+    if (matches.some((session) => session.cached && session.id !== id)) {
+      throw new Error('缓存更新失败，原会话已保留。请检查浏览器存储权限或可用空间后重试。');
+    }
+    cached = false;
+    result = memoryUpdate;
     temporaryTexts.set(id, text);
     warnCacheUnavailable();
+    const observation = directory || importDirectory || (restore && state.directoryLinks.get(name));
+    if (observation) result.directoryLinks.push({ ...observation, id, imported: !directory });
   }
   if (restore) state.removedIds.delete(id);
+  // Another tab may already have replaced a hash still present in this page's
+  // index. Reconcile local filename aliases as well as the transaction result.
+  for (const oldId of new Set([...memoryUpdate.removedIds, ...result.removedIds])) {
+    state.cachedSessions.delete(oldId);
+    temporaryTexts.delete(oldId);
+  }
+  for (const session of [...memoryUpdate.updatedSessions, ...result.updatedSessions]) {
+    state.cachedSessions.set(session.id, { ...session, cached: state.cachedSessions.get(session.id)?.cached ?? cached });
+  }
+  const metadata = { ...result.metadata, cached };
   state.cachedSessions.set(id, metadata);
-  if (directory) state.directoryLinks.set(directory.name, { ...directory, id });
-  return metadata;
+  for (const link of result.directoryLinks) state.directoryLinks.set(link.name, link);
+  return { ...result, metadata };
 }
 
 async function selectSession(id, { reloadDirectory = false, prepared, automatic = false } = {}) {
@@ -490,8 +518,12 @@ async function selectSession(id, { reloadDirectory = false, prepared, automatic 
   if (!state.current) renderEmpty({ loading: true });
   try {
     if (state.current?.id === id && !reloadDirectory) {
-      state.current.directory = session.directory;
+      const renamed = state.current.name !== session.name;
+      if (renamed) clearSearch();
+      state.current = { ...state.current, ...session, directory: session.directory };
       storage.set('last-directory', session.directory?.name || '');
+      storage.set('last-session-name', session.name);
+      if (renamed) { renderLibrary(); renderConversation(); }
       return;
     }
     let text = prepared?.text ?? temporaryTexts.get(id);
@@ -509,7 +541,7 @@ async function selectSession(id, { reloadDirectory = false, prepared, automatic 
       if (version !== state.loadVersion) return;
       text = decodeFile(buffer);
       conversation = state.current?.id === contentId ? state.current.conversation : parseConversation(text);
-      metadata = await rememberSession({ id: contentId, name: session.name, size: buffer.byteLength, text, directory: session.directory });
+      ({ metadata } = await rememberSession({ id: contentId, name: session.name, size: buffer.byteLength, text, directory: session.directory }));
       rebuildLibrary();
     }
     if (version !== state.loadVersion) return;
@@ -518,6 +550,7 @@ async function selectSession(id, { reloadDirectory = false, prepared, automatic 
     clearSearch();
     state.current = { ...metadata, name: session.name, directory: session.directory, text, conversation };
     storage.set('last-session-id', metadata.id);
+    storage.set('last-session-name', session.name);
     storage.set('last-directory', session.directory?.name || '');
     renderLibrary();
     renderConversation();
@@ -550,7 +583,9 @@ async function refreshDirectory({ initial = false } = {}) {
     // A slow directory scan must not replace a file the user just opened.
     if (version === state.selectionVersion) {
       const previousDirectory = state.current?.directory?.name || (initial ? storage.get('last-directory') : null);
+      const previousName = state.current?.name || storage.get('last-session-name');
       const preferred = state.sessions.find((session) => previousDirectory && session.directory?.name === previousDirectory)
+        || state.sessions.find((session) => session.name === previousName || sessionNames(session).includes(previousName))
         || state.sessions.find((session) => session.id === (state.current?.id || storage.get('last-session-id')))
         || state.sessions.find((session) => session.name === storage.get('last-session'))
         || state.sessions[0];
@@ -573,6 +608,7 @@ async function importFiles(fileList) {
   const errors = [];
   let first;
   let reused = 0;
+  let updated = 0;
   for (const file of fileList) {
     try {
       if (!/\.(md|markdown|txt)$/i.test(file.name)) throw new Error('请选择 .md、.markdown 或 .txt 文件。');
@@ -587,15 +623,14 @@ async function importFiles(fileList) {
           if (existing) { state.cachedSessions.set(id, existing); state.removedIds.delete(id); }
         } catch { warnCacheUnavailable(); }
       }
-      if (existing) {
-        first ||= { id };
-        reused++;
-        continue;
-      }
       const text = decodeFile(buffer);
-      const conversation = parseConversation(text);
-      await rememberSession({ id, name: file.name, size: file.size, text, restore: true });
-      first ||= { id, prepared: { text, conversation } };
+      const conversation = existing ? undefined : parseConversation(text);
+      const result = await rememberSession({ id, name: file.name, size: file.size, text, restore: true });
+      if (result.updated) updated++;
+      if (result.reused) reused++;
+      // A batch may contain several exports of the same filename. Select its
+      // last successful version, whose cache entry survives the replacements.
+      if (!first || first.name === file.name) first = { id, name: file.name, prepared: conversation ? { text, conversation } : undefined };
     } catch (error) { errors.push(`${file.name}：${error.message}`); }
   }
   rebuildLibrary();
@@ -604,7 +639,7 @@ async function importFiles(fileList) {
     if (first) {
       await selectSession(first.id, { prepared: first.prepared, automatic: true });
       const saved = state.cachedSessions.get(first.id)?.cached;
-      toast(reused === fileList.length ? '已复用本机已有会话' : saved ? '文件已打开并缓存到本机' : '文件已打开，本次仅在页面中保留');
+      toast(updated ? saved ? '同名会话缓存已更新' : '同名会话已更新，本次仅在页面中保留' : reused === fileList.length ? '已复用本机已有会话' : saved ? '文件已打开并缓存到本机' : '文件已打开，本次仅在页面中保留');
     } else {
       setBusy(false);
       if (!state.current) renderEmpty();
@@ -632,7 +667,7 @@ function resetCurrentSession() {
   $('#download-file').disabled = true;
   $('#footer-info').textContent = 'Codex CLI /export · Markdown 阅读器';
   document.title = 'Codex · 会话阅读器';
-  for (const key of ['last-session-id', 'last-directory', 'last-session']) storage.remove(key);
+  for (const key of ['last-session-id', 'last-session-name', 'last-directory', 'last-session']) storage.remove(key);
   renderEmpty();
   $('#reader').scrollTop = 0;
   updateProgress();
@@ -870,7 +905,9 @@ async function startReader() {
   // Restore the last cached conversation without waiting for a directory scan.
   if (state.loadVersion === 0) {
     rebuildLibrary();
-    const last = state.sessions.find((session) => session.id === storage.get('last-session-id'));
+    const lastName = storage.get('last-session-name');
+    const last = state.sessions.find((session) => session.name === lastName || sessionNames(session).includes(lastName))
+      || state.sessions.find((session) => session.id === storage.get('last-session-id'));
     if (last) {
       const directory = state.directoryLinks.get(storage.get('last-directory'));
       if (directory?.id === last.id) last.directory = directory;
