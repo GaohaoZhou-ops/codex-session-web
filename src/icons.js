@@ -10,6 +10,8 @@ const paths = {
   up: '<path d="m6 15 6-6 6 6"/>',
   arrowDown: '<path d="M12 4v16m-6-6 6 6 6-6"/>',
   arrowUp: '<path d="M12 20V4m-6 6 6-6 6 6"/>',
+  arrowUpToLine: '<path d="M4 3h16M12 21V7m-6 6 6-6 6 6"/>',
+  arrowDownToLine: '<path d="M4 21h16M12 3v14m-6-6 6 6 6-6"/>',
   arrowRight: '<path d="M4 12h16m-6-6 6 6-6 6"/>',
   copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
   check: '<path d="m5 12 4 4L19 6"/>',

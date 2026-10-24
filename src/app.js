@@ -82,7 +82,7 @@ $('#app').innerHTML = `
       <main class="reader" id="reader" aria-label="会话内容" tabindex="-1">
         <div class="reader-content" id="reader-content"></div>
       </main>
-      <footer class="reader-footer"><span id="footer-info">Codex CLI /export · Markdown 阅读器</span><div class="footer-navigation"><span id="reading-progress">0%</span><button class="icon-button small" id="scroll-top" aria-label="回到顶部" title="回到顶部">${icon('arrowUp')}</button><button class="icon-button small" id="scroll-bottom" aria-label="跳到末尾" title="跳到末尾">${icon('arrowDown')}</button></div></footer>
+      <footer class="reader-footer"><span id="footer-info">Codex CLI /export · Markdown 阅读器</span><div class="footer-navigation" role="group" aria-label="阅读导航"><span id="reading-progress">0%</span><button class="icon-button small" id="scroll-top" type="button" aria-label="回到顶部" title="回到顶部" disabled>${icon('arrowUpToLine')}</button><button class="icon-button small" id="previous-block" type="button" aria-label="上一块" title="上一块" disabled>${icon('arrowUp')}</button><button class="icon-button small" id="next-block" type="button" aria-label="下一块" title="下一块" disabled>${icon('arrowDown')}</button><button class="icon-button small" id="scroll-bottom" type="button" aria-label="到底部" title="到底部" disabled>${icon('arrowDownToLine')}</button></div></footer>
     </div>
   </div>
   <input type="file" id="file-input" accept=".md,.markdown,.txt,text/markdown,text/plain" multiple hidden />
@@ -764,10 +764,45 @@ function setActiveOutline(id) {
   }
 }
 
+function readingBlocks() {
+  // Each visible message, activity group or system panel is one block. Do not
+  // unfold details or include entries hidden by the current reading mode.
+  return [...($('#messages')?.children || [])].filter((element) => !element.hidden);
+}
+
+function blockScrollTop(element, reader) {
+  const top = reader.scrollTop + element.getBoundingClientRect().top - reader.getBoundingClientRect().top - 24;
+  return Math.max(0, Math.min(top, reader.scrollHeight - reader.clientHeight));
+}
+
+function moveBlock(step) {
+  const reader = $('#reader');
+  const blocks = readingBlocks();
+  if (step < 0) blocks.reverse();
+  const target = blocks.find((element) => step * (blockScrollTop(element, reader) - reader.scrollTop) > 1);
+  if (!target) return;
+  // Immediate positioning keeps consecutive clicks moving exactly one block
+  // at a time, including when the reader is partway through a long message.
+  reader.scrollTo({ top: blockScrollTop(target, reader), behavior: 'instant' });
+  updateProgress();
+}
+
+function scrollToEdge(bottom) {
+  const reader = $('#reader');
+  const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth';
+  reader.scrollTo({ top: bottom ? reader.scrollHeight : 0, behavior });
+}
+
 function updateProgress() {
   const reader = $('#reader');
   const distance = reader.scrollHeight - reader.clientHeight;
   $('#reading-progress').textContent = `${distance > 1 ? Math.round(reader.scrollTop / distance * 100) : state.current ? 100 : 0}%`;
+  const blocks = readingBlocks();
+  const hasBlocks = Boolean(state.current && blocks.length);
+  $('#scroll-top').disabled = !hasBlocks || reader.scrollTop <= 1;
+  $('#scroll-bottom').disabled = !hasBlocks || reader.scrollTop >= distance - 1;
+  $('#previous-block').disabled = !hasBlocks || reader.scrollTop <= blockScrollTop(blocks[0], reader) + 1;
+  $('#next-block').disabled = !hasBlocks || reader.scrollTop >= blockScrollTop(blocks.at(-1), reader) - 1;
   const top = reader.getBoundingClientRect().top;
   let active;
   for (const [id, element] of state.messageElements) {
@@ -832,8 +867,10 @@ $('#search-input').addEventListener('keydown', (event) => {
 $('#search-clear').addEventListener('click', () => { clearSearch(); $('#search-input').focus(); });
 $('#search-prev').addEventListener('click', () => nextMatch(-1));
 $('#search-next').addEventListener('click', () => nextMatch(1));
-$('#scroll-top').addEventListener('click', () => $('#reader').scrollTo({ top: 0, behavior: 'smooth' }));
-$('#scroll-bottom').addEventListener('click', () => $('#reader').scrollTo({ top: $('#reader').scrollHeight, behavior: 'smooth' }));
+$('#scroll-top').addEventListener('click', () => scrollToEdge(false));
+$('#previous-block').addEventListener('click', () => moveBlock(-1));
+$('#next-block').addEventListener('click', () => moveBlock(1));
+$('#scroll-bottom').addEventListener('click', () => scrollToEdge(true));
 $('#download-file').addEventListener('click', () => {
   if (!state.current) return;
   const url = URL.createObjectURL(new Blob([state.current.text], { type: 'text/markdown;charset=utf-8' }));
@@ -856,12 +893,16 @@ $('#reader-content').addEventListener('click', async (event) => {
   } catch (error) { showError(error.message); }
 });
 let scrollQueued = false;
-$('#reader').addEventListener('scroll', () => {
+function scheduleProgress() {
   if (scrollQueued) return;
   scrollQueued = true;
   requestAnimationFrame(() => { updateProgress(); scrollQueued = false; });
-}, { passive: true });
-window.addEventListener('resize', updateProgress);
+}
+$('#reader').addEventListener('scroll', scheduleProgress, { passive: true });
+window.addEventListener('resize', scheduleProgress);
+// Expanded messages and tool outputs can change the reachable block anchors
+// without a scroll event, so keep the boundary buttons in sync with layout.
+new ResizeObserver(scheduleProgress).observe($('#reader-content'));
 
 document.addEventListener('keydown', (event) => {
   if ($('#delete-dialog').open) return;
