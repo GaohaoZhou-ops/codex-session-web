@@ -2,7 +2,7 @@ import './styles.css';
 import { activityText, findMatches, groupMessages, MAX_FILE_BYTES, messagePreview, parseConversation } from './parser.js';
 import { escapeHTML, highlightMatches, renderMarkdown } from './markdown.js';
 import { icon } from './icons.js';
-import { deleteCachedSession, findCachedSession, planSessionUpdate, readCacheIndex, readCachedText, saveCachedSession, sessionId, sessionNames } from './session-cache.js';
+import { deleteCachedSession, findCachedSession, planSessionUpdate, readCacheIndex, readCachedText, sameDirectoryVersion, saveCachedSession, saveUploadedDirectory, sessionId, sessionNames } from './session-cache.js';
 import { formatSessionTime, sessionStartTime } from './session-time.js';
 
 const $ = (selector) => document.querySelector(selector);
@@ -165,7 +165,7 @@ function rebuildLibrary() {
   const sessions = new Map();
   for (const directory of state.directoryFiles) {
     const link = state.directoryLinks.get(directory.name);
-    const sameVersion = link?.size === directory.size && link?.modifiedAt === directory.modifiedAt;
+    const sameVersion = sameDirectoryVersion(link, directory);
     if (sameVersion && state.removedIds.has(link.id)) continue;
     const cached = sameVersion ? state.cachedSessions.get(link.id) : undefined;
     // An uploaded replacement takes precedence over an unchanged directory
@@ -598,6 +598,21 @@ async function refreshDirectory({ initial = false } = {}) {
   } finally { $('#refresh-files').disabled = false; }
 }
 
+async function archiveImportedFile(file, buffer, id) {
+  const response = await fetch(`/api/session?name=${encodeURIComponent(file.name)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: buffer,
+  });
+  if (!response.ok) throw new Error((await response.json()).error || '无法保存会话文件。');
+  const { session: directory } = await response.json();
+  let link = { ...directory, id, imported: true };
+  try { link = await saveUploadedDirectory(id, directory); }
+  catch { warnCacheUnavailable(); }
+  state.directoryLinks.set(directory.name, link);
+  const index = state.directoryFiles.findIndex((entry) => entry.name === directory.name);
+  if (index === -1) state.directoryFiles.push(directory);
+  else state.directoryFiles[index] = directory;
+}
+
 async function importFiles(fileList) {
   state.selectionVersion++;
   const version = ++state.loadVersion;
@@ -631,6 +646,8 @@ async function importFiles(fileList) {
       // A batch may contain several exports of the same filename. Select its
       // last successful version, whose cache entry survives the replacements.
       if (!first || first.name === file.name) first = { id, name: file.name, prepared: conversation ? { text, conversation } : undefined };
+      try { await archiveImportedFile(file, buffer, id); }
+      catch (error) { errors.push(`${file.name}：文件已在本机打开，但保存到会话目录失败：${error.message}`); }
     } catch (error) { errors.push(`${file.name}：${error.message}`); }
   }
   rebuildLibrary();

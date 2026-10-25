@@ -1,50 +1,33 @@
 import http from 'node:http';
-import { open, readdir, readFile, stat } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { isConversationExport, MAX_FILE_BYTES } from './src/parser.js';
+import { MAX_FILE_BYTES } from './src/parser.js';
+import { listSessionFiles, readSessionFile, saveSessionFile, validateFilename } from './src/session-files.js';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.map': 'application/json' };
-const EXPORT_EXTENSION = /\.(md|markdown|txt)$/i;
 const fingerprint = (directory) => createHash('sha256').update(path.resolve(directory)).digest('hex').slice(0, 16);
 
-async function readExport(directory, name, previewOnly = false) {
-  if (!name || name !== path.basename(name) || name.includes('\\') || !EXPORT_EXTENSION.test(name)) {
-    throw Object.assign(new Error('文件不存在。'), { status: 404 });
+async function readUpload(request) {
+  const tooLarge = () => Object.assign(new Error('文件超过 20 MB，请分段导出后读取。'), { status: 413 });
+  if (Number(request.headers['content-length']) > MAX_FILE_BYTES) { request.resume(); throw tooLarge(); }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
+    size += chunk.length;
+    if (size > MAX_FILE_BYTES) { request.resume(); throw tooLarge(); }
+    chunks.push(chunk);
   }
-  let handle;
-  try {
-    handle = await open(path.join(directory, name), constants.O_RDONLY | constants.O_NOFOLLOW);
-    const info = await handle.stat();
-    if (!info.isFile()) throw Object.assign(new Error('文件不存在。'), { status: 404 });
-    if (info.size > MAX_FILE_BYTES) throw Object.assign(new Error('文件超过 20 MB，请分段导出后读取。'), { status: 413 });
-    const buffer = Buffer.alloc(Math.min(4096, info.size));
-    await handle.read(buffer, 0, buffer.length, 0);
-    if (!isConversationExport(buffer.toString('utf8'))) {
-      throw Object.assign(new Error('这不是 Codex 导出文件，请通过页面的“打开文件”手动载入。'), { status: 422 });
-    }
-    if (previewOnly) return { name, size: info.size, modifiedAt: info.mtime.toISOString() };
-    // Read from offset zero so the preview header is included in the response.
-    const content = Buffer.alloc(info.size);
-    let offset = 0;
-    while (offset < content.length) {
-      const { bytesRead } = await handle.read(content, offset, content.length - offset, offset);
-      if (!bytesRead) break;
-      offset += bytesRead;
-    }
-    return content.subarray(0, offset);
-  } finally {
-    await handle?.close();
-  }
+  return Buffer.concat(chunks, size);
 }
 
-export function createReaderServer({ directory = ROOT, host = '127.0.0.1' } = {}) {
+export function createReaderServer({ directory = ROOT, host = '127.0.0.1', now = () => new Date() } = {}) {
   const project = fingerprint(directory);
   return http.createServer(async (request, response) => {
+    const uploadedAt = now();
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Referrer-Policy', 'no-referrer');
     response.setHeader('Cache-Control', 'no-store');
@@ -59,27 +42,25 @@ export function createReaderServer({ directory = ROOT, host = '127.0.0.1' } = {}
       const allowedHosts = new Set(['127.0.0.1', 'localhost', '[::1]', host]);
       if (!allowedHosts.has(url.hostname)) return reply(403, { error: '不允许的主机名。' });
       if (request.headers.origin && request.headers.origin !== url.origin) return reply(403, { error: '不允许跨站读取本地会话。' });
+      if (url.pathname === '/api/session' && request.method === 'POST') {
+        // A non-simple content type prevents cross-site HTML forms from writing
+        // local files; cross-origin fetches also fail the existing Origin check.
+        if (request.headers['content-type'] !== 'application/octet-stream') return reply(415, { error: '请上传原始文件内容。' });
+        const name = url.searchParams.get('name');
+        validateFilename(name);
+        const session = await saveSessionFile(directory, name, await readUpload(request), uploadedAt);
+        return reply(200, { session });
+      }
       if (!['GET', 'HEAD'].includes(request.method)) {
-        response.setHeader('Allow', 'GET, HEAD');
+        response.setHeader('Allow', url.pathname === '/api/session' ? 'GET, HEAD, POST' : 'GET, HEAD');
         return reply(405, { error: '只支持读取。' });
       }
       if (url.pathname === '/api/health') return reply(200, { app: 'codex-session-reader', project, pid: process.pid });
       if (url.pathname === '/api/sessions') {
-        const files = await readdir(directory, { withFileTypes: true });
-        const sessions = [];
-        // Bound file descriptors even in directories containing many exports.
-        for (const file of files) {
-          if (!file.isFile() || !EXPORT_EXTENSION.test(file.name)) continue;
-          try { sessions.push(await readExport(directory, file.name, true)); }
-          catch (error) {
-            if (!['ENOENT', 'ELOOP', 'EACCES'].includes(error.code) && !error.status) throw error;
-          }
-        }
-        sessions.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt) || a.name.localeCompare(b.name));
-        return reply(200, { sessions });
+        return reply(200, { sessions: await listSessionFiles(directory) });
       }
       if (url.pathname === '/api/session') {
-        return reply(200, await readExport(directory, url.searchParams.get('name')), 'text/plain; charset=utf-8');
+        return reply(200, await readSessionFile(directory, url.searchParams.get('name')), 'text/plain; charset=utf-8');
       }
       const pathname = decodeURIComponent(url.pathname);
       const file = pathname === '/' ? path.join(PUBLIC, 'index.html') : path.resolve(PUBLIC, `.${pathname}`);
@@ -92,7 +73,7 @@ export function createReaderServer({ directory = ROOT, host = '127.0.0.1' } = {}
       return reply(200, await readFile(file), MIME[path.extname(file)]);
     } catch (error) {
       const status = error.status || (['ENOENT', 'ELOOP', 'ENOTDIR'].includes(error.code) ? 404 : error instanceof URIError || error instanceof TypeError ? 400 : 500);
-      reply(status, { error: error.status ? error.message : status === 404 ? '文件不存在。' : status === 400 ? '请求格式不正确。' : '读取失败，请检查文件权限后重试。' });
+      reply(status, { error: error.status ? error.message : status === 404 ? '文件不存在。' : status === 400 ? '请求格式不正确。' : request.method === 'POST' ? '保存失败，请检查目录权限和磁盘空间后重试。' : '读取失败，请检查文件权限后重试。' });
     }
   });
 }

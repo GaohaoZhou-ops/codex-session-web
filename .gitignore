@@ -28,6 +28,10 @@ node_modules/
 !.env.sample
 !.env.template
 
+# Session archive data stays local; version only its directory helper.
+/sessions/*
+!/sessions/today.sh
+
 # Private exports, including copies organized into subdirectories.
 codex-session-*.md
 codex-session-*.markdown

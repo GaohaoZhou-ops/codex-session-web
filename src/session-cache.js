@@ -52,6 +52,28 @@ export function sessionNames(session) {
   return session?.deleted ? [] : session?.names || (session?.name ? [session.name] : []);
 }
 
+export function sameDirectoryVersion(link, directory) {
+  return link?.size === directory.size && link?.modifiedAt === directory.modifiedAt
+    && (link.path || link.name) === (directory.path || directory.name)
+    && (!link.version || !directory.version || link.version === directory.version);
+}
+
+export async function saveUploadedDirectory(id, directory) {
+  const database = await openDatabase();
+  const transaction = database.transaction(['sessions', 'directories'], 'readwrite');
+  const current = transaction.objectStore('sessions').get(id);
+  const currentName = transaction.objectStore('sessions').index('names').get(directory.name);
+  const link = { ...directory, id, imported: true };
+  currentName.onsuccess = () => {
+    // Another tab may have deleted or replaced this import while it was being
+    // written to disk. Do not reconnect an obsolete version to its cache.
+    if (current.result?.deleted || currentName.result && currentName.result.id !== id) return;
+    transaction.objectStore('directories').put(link);
+  };
+  await completed(transaction, () => undefined);
+  return link;
+}
+
 export function planSessionUpdate({ id, name, size }, existing, matches) {
   const previous = matches.filter((session) => !session.deleted && session.id !== id);
   const live = existing && !existing.deleted ? existing : undefined;
@@ -125,7 +147,7 @@ export async function saveCachedSession({ id, name, size, text, directory, impor
     // a deleted session. Only an explicit file import restores it.
     if (existing.result?.deleted && !restore) { blocked = 'SESSION_DELETED'; return; }
     const link = previousDirectory.result;
-    if (!restore && directory && link?.imported && link.id !== id && link.size === directory.size && link.modifiedAt === directory.modifiedAt) {
+    if (!restore && directory && link?.imported && link.id !== id && sameDirectoryVersion(link, directory)) {
       blocked = 'SESSION_UPDATED';
       return;
     }

@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures.mjs';
 import { readFile } from 'node:fs/promises';
 
 const original = '\uFEFF# Codex conversation\r\n\r\n## User\r\n缓存恢复问题\r\n## Assistant\r\n缓存恢复回答\r\n';
@@ -65,7 +65,7 @@ test('brand navigation, reload and a new tab preserve the imported conversation 
   await page.getByRole('button', { name: '下载当前原始文件' }).click();
   expect(await readFile(await (await downloadEvent).path())).toEqual(Buffer.from(original));
   expect((await cacheSummary(page)).contents).toBe(2);
-  expect(writes).toEqual([]);
+  expect(writes.map((url) => new URL(url).pathname)).toEqual(['/api/session']);
   await page.close();
   const reopened = await context.newPage();
   await reopened.goto('/');
@@ -221,8 +221,8 @@ test('simultaneous imports from two tabs store one copy of the same content', as
   const other = await context.newPage();
   await openReader(other);
   await Promise.all([upload(page, original, 'one.md'), upload(other, original, 'two.md')]);
-  await expect(page.locator('.message-assistant')).toContainText('缓存恢复回答');
-  await expect(other.locator('.message-assistant')).toContainText('缓存恢复回答');
+  await expect(page.locator('.message-assistant').last()).toContainText('缓存恢复回答');
+  await expect(other.locator('.message-assistant').last()).toContainText('缓存恢复回答');
   const summary = await cacheSummary(page);
   expect(summary.contents).toBe(2);
   expect(summary.sessions).toHaveLength(2);
@@ -378,7 +378,7 @@ test('deleting the last directory session clears the reader and does not return 
   await page.reload();
   await expect(page.getByRole('heading', { name: '让每一段对话，清晰可读。' })).toBeVisible();
   await expect(page.locator('#session-count')).toHaveText('0');
-  // The read-only server and original export remain intact.
+  // Removing a session still leaves its original export intact.
   const response = await page.request.get('/api/session?name=codex-session-demo.md');
   expect(response.ok()).toBe(true);
   const fixture = await readFile(new URL('../fixtures/codex-session-demo.md', import.meta.url), 'utf8');
@@ -531,7 +531,7 @@ test('failed same-name updates retain the previous cache and reader until a succ
 test('an uploaded update takes precedence over the unchanged directory file on refresh and reload', async ({ page }) => {
   await openReader(page);
   const requests = [];
-  page.on('request', (request) => { if (new URL(request.url()).pathname === '/api/session') requests.push(request.url()); });
+  page.on('request', (request) => { if (request.method() === 'GET' && new URL(request.url()).pathname === '/api/session') requests.push(request.url()); });
   const updated = '## User\n导入新导出\n## Assistant\n优先显示上传的新版本';
   await upload(page, updated, 'codex-session-demo.md');
   await expect(page.locator('.message-assistant').last()).toContainText('优先显示上传的新版本');

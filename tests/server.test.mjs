@@ -44,7 +44,7 @@ test('blocks traversal, symlinks, non-export files, and access to project source
   assert.equal((await fetch(`${url}/api/session`)).status, 404);
 });
 
-test('blocks cross-origin reads, unknown hosts, and writes', async (context) => {
+test('blocks cross-origin reads, unknown hosts, and unsupported writes', async (context) => {
   const { url } = await setup(context);
   assert.equal((await fetch(`${url}/api/sessions`, { headers: { origin: 'https://unrelated.example' } })).status, 403);
   const foreignHostStatus = await new Promise((resolve, reject) => {

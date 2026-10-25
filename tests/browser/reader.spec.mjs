@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures.mjs';
 import { readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
@@ -192,9 +192,9 @@ test('renders Markdown, copies code and source paths, and downloads the original
   expect(await readFile(await (await saved).path())).toEqual(Buffer.from(original));
 });
 
-test('untrusted export HTML cannot run scripts or automatically load remote images', async ({ page }) => {
+test('untrusted export HTML cannot run scripts or automatically load remote images', async ({ page, baseURL }) => {
   const remote = [];
-  page.on('request', (request) => { if (!request.url().startsWith('http://127.0.0.1:4175')) remote.push(request.url()); });
+  page.on('request', (request) => { if (new URL(request.url()).origin !== baseURL) remote.push(request.url()); });
   await openReader(page);
   await upload(page, '## User\n测试安全渲染\n## Assistant\n<script>window.exportExecuted = true</script>\n<img src="https://example.com/track.png" onerror="window.exportExecuted = true">\n<iframe src="https://example.com"></iframe>\n\n[恶意链接](javascript:window.exportExecuted=true)\n\n![远程图片](https://example.com/private.png)\n\n**正常内容**', 'untrusted.md');
   await expect(page.locator('.conversation-filename')).toContainText('untrusted.md');
