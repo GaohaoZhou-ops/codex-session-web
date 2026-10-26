@@ -189,3 +189,60 @@ export async function deleteCachedSession(id, directory) {
   }
   return completed(transaction, () => undefined);
 }
+
+export async function pruneUnarchivedSessions(files, snapshot) {
+  const namesOnDisk = new Set(files.map((file) => file.name));
+  const candidates = new Map(snapshot.sessions.filter((session) => !sessionNames(session).some((name) => namesOnDisk.has(name))).map((session) => [session.id, session]));
+  if (!candidates.size) return [];
+  const observedLinks = new Map(snapshot.directories.map((link) => [link.name, link]));
+  const database = await openDatabase();
+  const transaction = database.transaction(['sessions', 'contents', 'directories'], 'readwrite');
+  const sessions = transaction.objectStore('sessions');
+  const directories = transaction.objectStore('directories');
+  const index = sessions.getAll();
+  const links = directories.getAll();
+  const removed = [];
+  links.onsuccess = () => {
+    for (const session of index.result) {
+      const observed = candidates.get(session.id);
+      if (!observed || session.deleted || session.name !== observed.name || JSON.stringify(sessionNames(session)) !== JSON.stringify(sessionNames(observed))) continue;
+      const related = links.result.filter((link) => link.id === session.id);
+      // An upload in another tab may have completed after the disk scan began.
+      if (related.some((link) => observedLinks.get(link.name)?.id !== link.id || !sameDirectoryVersion(observedLinks.get(link.name), link))) continue;
+      sessions.delete(session.id);
+      transaction.objectStore('contents').delete(session.id);
+      for (const link of related) directories.delete(link.name);
+      removed.push(session.id);
+    }
+  };
+  return completed(transaction, () => removed);
+}
+
+export async function forgetArchivedSessions(archivePath) {
+  const database = await openDatabase();
+  const transaction = database.transaction(['sessions', 'contents', 'directories'], 'readwrite');
+  const sessions = transaction.objectStore('sessions');
+  const directories = transaction.objectStore('directories');
+  const index = sessions.getAll();
+  const links = directories.getAll();
+  links.onsuccess = () => {
+    const removedNames = new Map();
+    for (const link of links.result) {
+      if (link.path !== archivePath && !link.path?.startsWith(`${archivePath}/`)) continue;
+      directories.delete(link.name);
+      if (!removedNames.has(link.id)) removedNames.set(link.id, new Set());
+      removedNames.get(link.id).add(link.name);
+    }
+    for (const session of index.result) {
+      const removed = removedNames.get(session.id);
+      if (!removed) continue;
+      const names = sessionNames(session).filter((name) => !removed.has(name));
+      if (names.length) sessions.put({ ...session, names, name: names.includes(session.name) ? session.name : names[0] });
+      else {
+        sessions.delete(session.id);
+        transaction.objectStore('contents').delete(session.id);
+      }
+    }
+  };
+  return completed(transaction, () => undefined);
+}

@@ -71,7 +71,7 @@ test('reading modes preserve full content and final replies in each turn', async
   await expect(page.locator('.activity-group[open]')).toHaveCount(0);
 });
 
-test('footer navigation moves through visible blocks and keeps separate page boundaries', async ({ page }) => {
+test('footer navigation moves through visible blocks and returns to the reader top', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 700 });
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await openReader(page);
@@ -117,10 +117,9 @@ test('footer navigation moves through visible blocks and keeps separate page bou
   await previous.click();
   await expectAnchor(page.locator('.message-user').first());
   await bottom.click();
-  await expect(page.locator('#reading-progress')).toHaveText('100%');
+  await expect(page.locator('#messages > :visible').last()).toBeInViewport();
   await expect(next).toBeDisabled();
   await expect(bottom).toBeDisabled();
-  await expect(page.locator('.conversation-end')).toBeInViewport();
   const endPosition = await page.locator('#reader').evaluate((reader) => reader.scrollTop);
   await previous.click();
   expect(await page.locator('#reader').evaluate((reader) => reader.scrollTop)).toBeLessThan(endPosition);
@@ -146,7 +145,14 @@ test('footer navigation handles empty and short sessions, layout changes and nar
   await expect(page.getByRole('button', { name: '到底部' })).toBeEnabled();
   await expect(page.getByRole('button', { name: '下一块' })).toBeEnabled();
   await page.getByRole('button', { name: '到底部' }).click();
-  await expect(page.locator('#reading-progress')).toHaveText('100%');
+  const lastBlockOffset = () => page.locator('.message-user').evaluate((block) => Math.round(block.getBoundingClientRect().top - document.querySelector('#reader').getBoundingClientRect().top));
+  await expect.poll(lastBlockOffset).toBe(24);
+  await expect(page.locator('#reading-progress')).not.toHaveText('100%');
+  await expect(page.getByRole('button', { name: '到底部' })).toBeDisabled();
+  await page.locator('#reader').evaluate((reader) => { reader.scrollTop = reader.scrollHeight; });
+  await expect(page.getByRole('button', { name: '到底部' })).toBeEnabled();
+  await page.getByRole('button', { name: '到底部' }).click();
+  await expect.poll(lastBlockOffset).toBe(24);
   await page.getByRole('button', { name: '收起提问' }).click();
   await expect(page.locator('.footer-navigation button:enabled')).toHaveCount(0);
   await page.setViewportSize({ width: 320, height: 844 });
@@ -166,7 +172,7 @@ test('imports files, keeps code headings intact, and reports invalid files witho
   await upload(page, '# This is not a conversation', 'invalid.md');
   await expect(page.getByRole('alert')).toContainText('未找到对话');
   await expect(page.locator('.conversation-filename')).toContainText('新的会话.txt');
-  await page.locator('.session-item').first().click();
+  await page.locator('.session-item[title="codex-session-demo.md"]').click();
   await expect(page.locator('.conversation-filename')).toContainText('codex-session-demo.md');
   await expect(page.getByRole('alert')).toBeHidden();
 });

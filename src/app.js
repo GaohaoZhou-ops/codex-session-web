@@ -2,8 +2,10 @@ import './styles.css';
 import { activityText, findMatches, groupMessages, MAX_FILE_BYTES, messagePreview, parseConversation } from './parser.js';
 import { escapeHTML, highlightMatches, renderMarkdown } from './markdown.js';
 import { icon } from './icons.js';
-import { deleteCachedSession, findCachedSession, planSessionUpdate, readCacheIndex, readCachedText, sameDirectoryVersion, saveCachedSession, saveUploadedDirectory, sessionId, sessionNames } from './session-cache.js';
+import { deleteCachedSession, findCachedSession, forgetArchivedSessions, planSessionUpdate, pruneUnarchivedSessions, readCacheIndex, readCachedText, sameDirectoryVersion, saveCachedSession, saveUploadedDirectory, sessionId, sessionNames } from './session-cache.js';
 import { formatSessionTime, sessionStartTime } from './session-time.js';
+import { setupSidebarResize } from './sidebar-resize.js';
+import { setupArchiveManager } from './archive-manager.js';
 
 const $ = (selector) => document.querySelector(selector);
 const storage = {
@@ -17,12 +19,13 @@ const VIEW_MODES = [
   { value: 'compact', label: '精简视图', description: '只看提问与本轮最后回复', icon: 'book' },
   { value: 'full', label: '完整记录', description: '展开全部工具活动与输出', icon: 'terminal' },
 ];
-const state = { sessions: [], directoryFiles: [], cachedSessions: new Map(), directoryLinks: new Map(), libraryLimit: LIBRARY_PAGE_SIZE, current: null, loadingId: null, selectionVersion: 0, view: storage.get('view') || 'conversation', query: '', matches: [], matchIndex: -1, loadVersion: 0, theme: storage.get('theme') || 'light', messageElements: new Map(), groupElements: new Map(), activeId: null };
+const state = { sessions: [], directoryFiles: [], directoryScanned: false, cachedSessions: new Map(), directoryLinks: new Map(), libraryFilter: storage.get('library-filter') || 'all', libraryLimit: LIBRARY_PAGE_SIZE, current: null, loadingId: null, selectionVersion: 0, view: storage.get('view') || 'conversation', query: '', matches: [], matchIndex: -1, loadVersion: 0, theme: storage.get('theme') || 'light', messageElements: new Map(), groupElements: new Map(), activeId: null };
 // File bodies normally live only in IndexedDB and in the active reader. This
 // fallback keeps reading usable when storage is disabled or its quota is full.
 const temporaryTexts = new Map();
 state.removedIds = new Set();
 if (!['conversation', 'compact', 'full'].includes(state.view)) state.view = 'conversation';
+if (!/^(all|root|\d{4}-\d{2}-\d{2})$/.test(state.libraryFilter)) state.libraryFilter = 'all';
 const bytes = (size) => size < 1024 ? `${size} B` : size < 1024 ** 2 ? `${(size / 1024).toFixed(0)} KB` : `${(size / 1024 ** 2).toFixed(1)} MB`;
 const shortName = (name) => name.replace(/^codex-session-/, '').replace(/\.(md|markdown|txt)$/i, '');
 function decodeFile(buffer) {
@@ -45,9 +48,14 @@ $('#app').innerHTML = `
       <div class="sidebar-scroll">
         <section class="library-section">
           <div class="section-heading"><span>会话文件 <span id="session-count" class="count-badge">0</span></span><button class="icon-button small" id="refresh-files" title="刷新当前目录的导出文件" aria-label="刷新文件列表">${icon('refresh')}</button></div>
+          <div class="library-filter">
+            <div class="library-filter-heading"><label for="session-date-filter">归档日期</label><button id="reset-library-filter" type="button" hidden>清除筛选</button></div>
+            <div class="library-filter-control">${icon('clock')}<select id="session-date-filter" aria-controls="session-list" title="按 sessions/ 下的日期文件夹筛选"><option value="all">全部日期</option></select>${icon('down')}</div>
+          </div>
+          <p class="library-current-note" id="library-current-note" role="status" hidden>当前阅读的会话不在此筛选中。</p>
           <div id="session-list" class="session-list"></div>
           <button class="library-more" id="load-more-sessions" hidden>显示更多会话</button>
-          <p class="library-note">当前目录与本机缓存的文件</p>
+          <p class="library-note">按 sessions/ 日期文件夹分组</p>
           <p class="cache-warning" id="cache-warning" role="status" hidden></p>
         </section>
         <section class="outline-section">
@@ -58,6 +66,7 @@ $('#app').innerHTML = `
       <div class="sidebar-bottom"><span class="local-status"><span class="status-dot"></span>本地工作区</span></div>
       <div class="privacy-note">${icon('shield')}<span>文件在本机读取，安心回看。</span></div>
     </aside>
+    <div class="sidebar-resizer" id="sidebar-resizer" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" aria-controls="sidebar" tabindex="0" title="拖动调整侧栏宽度；双击恢复默认；方向键微调"></div>
     <div class="workspace">
       <header class="topbar">
         <div class="breadcrumb"><button class="icon-button mobile-menu" id="menu-toggle" aria-label="打开侧栏" aria-expanded="false">${icon('menu')}</button><span class="breadcrumb-icon">${icon('folder')}</span><span>工作区</span><span class="breadcrumb-slash">/</span><strong>会话阅读器</strong></div>
@@ -67,7 +76,10 @@ $('#app').innerHTML = `
         </div>
       </header>
       <div class="reader-toolbar">
+        <div class="search-tools">
         <div class="search-box">${icon('search')}<input type="search" id="search-input" placeholder="搜索此会话…" aria-label="搜索此会话" autocomplete="off" spellcheck="false" /><kbd id="search-shortcut">Ctrl K</kbd><div class="search-controls" id="search-controls" hidden><span id="search-count" role="status" aria-live="polite"></span><button class="icon-button small" id="search-prev" title="上一条匹配 · Shift+Enter" aria-label="上一条匹配">${icon('up')}</button><button class="icon-button small" id="search-next" title="下一条匹配 · Enter" aria-label="下一条匹配">${icon('down')}</button><button class="icon-button small" id="search-clear" title="清除搜索" aria-label="清除搜索">${icon('close')}</button></div></div>
+        <button class="manage-sessions" id="manage-sessions" type="button" aria-label="管理对话" title="管理对话">${icon('folder')}<span>管理对话</span></button>
+        </div>
         <div class="toolbar-actions">
           <div class="view-select">
             <button class="view-trigger" id="view-mode" type="button" role="combobox" aria-label="阅读视图" aria-haspopup="listbox" aria-expanded="false" aria-controls="view-options">${icon('book')}<span id="view-label"></span>${icon('down', 'view-chevron')}</button>
@@ -101,6 +113,7 @@ $('#app').innerHTML = `
 const openFile = () => $('#file-input').click();
 const setBusy = (busy) => {
   $('#reader').setAttribute('aria-busy', String(busy));
+  $('#manage-sessions').disabled = busy;
   if ($('#delete-session')) $('#delete-session').disabled = busy;
 };
 function toast(message) {
@@ -157,8 +170,38 @@ function chooseView(value) {
 }
 
 function warnCacheUnavailable() {
-  $('#cache-warning').textContent = '浏览器缓存不可用，未保存的文件仅在本页保留。请检查站点存储权限或可用空间。';
+  $('#cache-warning').textContent = '浏览器缓存不可用，归档文件仍可读取。请检查站点存储权限或可用空间。';
   $('#cache-warning').hidden = false;
+}
+
+function directoryGroup(directory) {
+  return directory ? /^sessions\/(\d{4}-\d{2}-\d{2})\/[^/]+$/.exec(directory.path)?.[1] || 'root' : 'cache';
+}
+
+function libraryGroupLabel(key) {
+  return key === 'root' ? '根目录' : key === 'cache' ? '未归档' : key;
+}
+
+function libraryGroups() {
+  const groups = new Map();
+  for (const session of state.sessions) {
+    const key = session.libraryGroup;
+    if (!groups.has(key)) groups.set(key, { key, sessions: [] });
+    groups.get(key).sessions.push(session);
+  }
+  const rank = (key) => key === 'root' ? 1 : key === 'cache' ? 2 : 0;
+  return [...groups.values()].sort((a, b) => rank(a.key) - rank(b.key) || b.key.localeCompare(a.key));
+}
+
+function filteredLibrary(groups = libraryGroups()) {
+  return groups.filter((group) => state.libraryFilter === 'all' || group.key === state.libraryFilter).flatMap((group) => group.sessions);
+}
+
+function setLibraryFilter(value) {
+  state.libraryFilter = value;
+  state.libraryLimit = LIBRARY_PAGE_SIZE;
+  storage.set('library-filter', value);
+  renderLibrary();
 }
 
 function rebuildLibrary() {
@@ -173,10 +216,21 @@ function rebuildLibrary() {
     const session = cached && link.imported
       ? { ...cached, source: cached.cached ? 'cache' : 'temporary' }
       : { ...(cached || { id: `directory:${directory.name}` }), ...directory, directory, source: 'directory' };
+    // Imported sessions read from cache, but still belong to their disk folder.
+    session.libraryGroup = directoryGroup(directory);
     if (!sessions.has(session.id)) sessions.set(session.id, session);
   }
   const cached = [...state.cachedSessions.values()].sort((a, b) => b.savedAt - a.savedAt || a.name.localeCompare(b.name));
-  for (const session of cached) if (!sessions.has(session.id) && !state.removedIds.has(session.id)) sessions.set(session.id, { ...session, source: session.cached ? 'cache' : 'temporary' });
+  for (const session of cached) {
+    if (sessions.has(session.id) || state.removedIds.has(session.id)) continue;
+    // Use the last known folder while the initial scan is pending or offline.
+    // After a successful scan, only files found on disk enter the library.
+    const directory = !state.directoryScanned
+      ? [session.name, ...sessionNames(session)].map((name) => state.directoryLinks.get(name)).find((link) => link?.id === session.id)
+      : undefined;
+    if (!directory) continue;
+    sessions.set(session.id, { ...session, libraryGroup: directoryGroup(directory), source: session.cached ? 'cache' : 'temporary' });
+  }
   // Sort directory and cached entries together using the same start time shown
   // in the reader. Decode each filename once; unknown times go at the end.
   state.sessions = [...sessions.values()]
@@ -188,27 +242,48 @@ function rebuildLibrary() {
 }
 
 function renderLibrary() {
-  $('#session-count').textContent = state.sessions.length;
+  const groups = libraryGroups();
+  const filtered = filteredLibrary(groups);
+  const filtering = state.libraryFilter !== 'all';
+  $('#session-count').textContent = filtering ? `${filtered.length}/${state.sessions.length}` : state.sessions.length;
+  $('#session-count').title = `筛选 ${filtered.length} 个，共 ${state.sessions.length} 个会话`;
+  const options = [new Option(`全部日期（${state.sessions.length}）`, 'all'), ...groups.map((group) => new Option(`${libraryGroupLabel(group.key)}（${group.sessions.length}）`, group.key))];
+  // Keep a vanished folder selectable with an honest empty state, including
+  // while a slow startup scan has not supplied its files yet.
+  if (filtering && !groups.some((group) => group.key === state.libraryFilter)) options.push(new Option(`${libraryGroupLabel(state.libraryFilter)}（0）`, state.libraryFilter));
+  $('#session-date-filter').replaceChildren(...options);
+  $('#session-date-filter').value = state.libraryFilter;
+  $('#reset-library-filter').hidden = !filtering;
   $('#session-list').replaceChildren();
-  const visible = state.sessions.slice(0, state.libraryLimit);
-  // Keep an older active file reachable after the batch, preserving date order
-  // without rendering thousands of preceding rows.
-  const current = state.sessions.find((session) => session.id === state.current?.id);
-  if (current && !visible.includes(current)) visible.push(current);
-  for (const session of visible) {
-    const button = document.createElement('button');
-    button.className = `session-item${state.current?.id === session.id ? ' active' : ''}`;
-    button.title = session.name;
-    button.setAttribute('aria-pressed', String(state.current?.id === session.id));
-    const source = session.source === 'directory' ? '当前目录' : session.cached ? '本机缓存' : '本次打开';
-    button.innerHTML = `${icon('file')}<span class="session-item-text"><span class="session-name">${escapeHTML(shortName(session.name))}</span><span class="session-meta">${source}<span>·</span>${bytes(session.size)}</span></span>${icon('chevron', 'session-chevron')}`;
-    button.addEventListener('click', () => selectSession(session.id));
-    $('#session-list').append(button);
+  const visible = new Set(filtered.slice(0, state.libraryLimit).map((session) => session.id));
+  // Keep the active file reachable only when it matches the selected folder.
+  const current = filtered.find((session) => session.id === state.current?.id);
+  if (current) visible.add(current.id);
+  $('#library-current-note').hidden = !filtering || !state.current || Boolean(current);
+  for (const group of groups) {
+    const sessions = group.sessions.filter((session) => visible.has(session.id));
+    if (!sessions.length) continue;
+    const section = document.createElement('section');
+    section.className = 'session-group';
+    section.dataset.group = group.key;
+    section.setAttribute('aria-labelledby', `session-group-${group.key}`);
+    section.innerHTML = `<h3 class="session-group-heading" id="session-group-${group.key}">${icon('folder')}<span>${escapeHTML(libraryGroupLabel(group.key))}</span><span class="count-badge">${group.sessions.length}</span></h3>`;
+    for (const session of sessions) {
+      const button = document.createElement('button');
+      button.className = `session-item${state.current?.id === session.id ? ' active' : ''}`;
+      button.title = session.name;
+      button.setAttribute('aria-pressed', String(state.current?.id === session.id));
+      const source = session.source === 'directory' ? '当前目录' : session.cached ? '本机缓存' : '本次打开';
+      button.innerHTML = `${icon('file')}<span class="session-item-text"><span class="session-name">${escapeHTML(shortName(session.name))}</span><span class="session-meta">${source}<span>·</span>${bytes(session.size)}</span></span>${icon('chevron', 'session-chevron')}`;
+      button.addEventListener('click', () => selectSession(session.id));
+      section.append(button);
+    }
+    $('#session-list').append(section);
   }
-  const remaining = state.sessions.length - visible.length;
+  const remaining = filtered.length - visible.size;
   $('#load-more-sessions').hidden = remaining <= 0;
   $('#load-more-sessions').textContent = `显示更多会话（剩余 ${remaining} 个）`;
-  if (!state.sessions.length) $('#session-list').innerHTML = '<p class="muted sidebar-empty">打开一个导出文件，开始阅读。</p>';
+  if (!filtered.length) $('#session-list').innerHTML = `<p class="muted sidebar-empty">${filtering ? '此分组暂无会话，可清除筛选查看全部。' : '打开一个导出文件，开始阅读。'}</p>`;
 }
 
 function renderEmpty({ loading = false } = {}) {
@@ -318,6 +393,7 @@ function renderActivities(group) {
 function renderConversation() {
   const session = state.current;
   const { conversation } = session;
+  archiveManager.refreshHighlight();
   state.messageElements.clear();
   state.groupElements.clear();
   state.activeId = null;
@@ -325,10 +401,11 @@ function renderConversation() {
   const count = conversation.counts.user + conversation.counts.assistant;
   const title = conversation.title === 'Codex conversation' ? 'Codex 会话' : conversation.title;
   const startedAt = sessionStartTime(session.name);
+  const isToday = startedAt?.toDateString() === new Date().toDateString();
   const startTime = document.createElement('span');
   startTime.className = 'conversation-start';
   startTime.title = startedAt ? '会话开始时间（本地时区）' : '原文件名未包含可识别的会话开始时间。';
-  startTime.innerHTML = `${icon('clock')}${startedAt ? `<time datetime="${startedAt.toISOString()}">${formatSessionTime(startedAt)}</time>` : '开始时间未知'}`;
+  startTime.innerHTML = `${icon('clock')}${startedAt ? `<time datetime="${startedAt.toISOString()}">${formatSessionTime(startedAt)}${isToday ? ' (今日)' : ''}</time>` : '开始时间未知'}`;
   content.innerHTML = `<section class="conversation-intro"><div class="intro-kicker"><span class="eyebrow">THE CONVERSATION</span><span class="file-format">MARKDOWN</span></div><div class="intro-title-row"><h1>${escapeHTML(title)}</h1><button class="jump-answer" id="jump-answer">跳到最后回复 ${icon('arrowDown')}</button></div><p class="conversation-filename" title="${escapeHTML(session.name)}">${icon('file')}<span>${escapeHTML(session.name)}</span></p><div class="conversation-stats"><span>${icon('chat')}<strong>${count}</strong> 条对话</span><i></i><span>${icon('terminal')}<strong>${conversation.counts.activity}</strong> 次工具活动</span><i></i><span>${bytes(session.size)}</span><span class="reading-note">一段思路，完整保留。</span></div></section><div class="conversation-messages" id="messages"></div><div class="conversation-end"><span></span>${icon('check')}已读到这段会话的末尾<span></span></div>`;
   $('.reading-note').before(startTime);
   const actions = document.createElement('div');
@@ -465,6 +542,7 @@ async function restoreCache() {
     }
     for (const id of state.removedIds) temporaryTexts.delete(id);
     for (const session of index.sessions) state.cachedSessions.set(session.id, { ...session, cached: true });
+    state.directoryLinks.clear();
     for (const link of index.directories) state.directoryLinks.set(link.name, link);
   } catch { warnCacheUnavailable(); }
 }
@@ -568,10 +646,23 @@ async function refreshDirectory({ initial = false } = {}) {
   $('#refresh-files').disabled = true;
   let directoryError;
   try {
-    const [response] = await Promise.all([fetch('/api/sessions'), initial ? cacheReady : restoreCache()]);
+    const [response, snapshot] = await Promise.all([fetch('/api/sessions'), (initial ? cacheReady : restoreCache()).then(() => ({ sessions: [...state.cachedSessions.values()], directories: [...state.directoryLinks.values()] }))]);
     if (!response.ok) throw new Error('无法读取当前目录。你仍可以用“打开导出文件”选择文件。');
     const { sessions } = await response.json();
-    state.directoryFiles = sessions;
+    const observed = new Map(snapshot.directories.map((link) => [link.name, link]));
+    const scanned = new Map(sessions.map((file) => [file.name, file]));
+    for (const file of state.directoryFiles) {
+      const link = state.directoryLinks.get(file.name);
+      if (link?.imported && (observed.get(file.name)?.id !== link.id || !sameDirectoryVersion(observed.get(file.name), file))) scanned.set(file.name, file);
+    }
+    state.directoryFiles = [...scanned.values()];
+    state.directoryScanned = true;
+    try {
+      const removed = new Set(await pruneUnarchivedSessions(state.directoryFiles, snapshot));
+      for (const id of removed) { state.cachedSessions.delete(id); temporaryTexts.delete(id); }
+      for (const [name, link] of state.directoryLinks) if (removed.has(link.id)) state.directoryLinks.delete(name);
+      if (removed.has(state.current?.id)) { state.loadVersion++; resetCurrentSession(); }
+    } catch { warnCacheUnavailable(); }
   } catch (error) {
     directoryError = error.message || '无法读取当前目录。';
     await cacheReady;
@@ -588,7 +679,7 @@ async function refreshDirectory({ initial = false } = {}) {
         || state.sessions.find((session) => session.name === previousName || sessionNames(session).includes(previousName))
         || state.sessions.find((session) => session.id === (state.current?.id || storage.get('last-session-id')))
         || state.sessions.find((session) => session.name === storage.get('last-session'))
-        || state.sessions[0];
+        || filteredLibrary()[0];
       if (preferred) {
         if (!initial || state.loadingId !== preferred.id) await selectSession(preferred.id, { reloadDirectory: !initial && Boolean(preferred.directory), automatic: true });
       } else if (!state.current) renderEmpty();
@@ -640,14 +731,14 @@ async function importFiles(fileList) {
       }
       const text = decodeFile(buffer);
       const conversation = existing ? undefined : parseConversation(text);
+      try { await archiveImportedFile(file, buffer, id); }
+      catch (error) { throw new Error(`归档失败，未加入会话列表：${error.message}`); }
       const result = await rememberSession({ id, name: file.name, size: file.size, text, restore: true });
       if (result.updated) updated++;
       if (result.reused) reused++;
       // A batch may contain several exports of the same filename. Select its
       // last successful version, whose cache entry survives the replacements.
       if (!first || first.name === file.name) first = { id, name: file.name, prepared: conversation ? { text, conversation } : undefined };
-      try { await archiveImportedFile(file, buffer, id); }
-      catch (error) { errors.push(`${file.name}：文件已在本机打开，但保存到会话目录失败：${error.message}`); }
     } catch (error) { errors.push(`${file.name}：${error.message}`); }
   }
   rebuildLibrary();
@@ -656,7 +747,7 @@ async function importFiles(fileList) {
     if (first) {
       await selectSession(first.id, { prepared: first.prepared, automatic: true });
       const saved = state.cachedSessions.get(first.id)?.cached;
-      toast(updated ? saved ? '同名会话缓存已更新' : '同名会话已更新，本次仅在页面中保留' : reused === fileList.length ? '已复用本机已有会话' : saved ? '文件已打开并缓存到本机' : '文件已打开，本次仅在页面中保留');
+      toast(updated ? saved ? '同名会话缓存已更新' : '同名归档已更新，浏览器缓存暂不可用' : reused === fileList.length ? '已复用本机已有会话' : saved ? '文件已打开并缓存到本机' : '文件已归档，浏览器缓存暂不可用');
     } else {
       setBusy(false);
       if (!state.current) renderEmpty();
@@ -672,6 +763,31 @@ function queueImport(fileList) {
   // FileList is live; snapshot and clear it before awaiting file IO.
   $('#file-input').value = '';
   importQueue = importQueue.then(() => importFiles(files)).catch((error) => { showError(error.message); setBusy(false); });
+}
+
+function currentArchivePath() {
+  if (!state.current) return null;
+  return state.current.directory?.path || state.directoryLinks.get(state.current.name)?.path || null;
+}
+
+async function archiveDeleted(archivePath) {
+  const matches = (filePath) => filePath === archivePath || filePath?.startsWith(`${archivePath}/`);
+  const currentDeleted = matches(currentArchivePath());
+  state.selectionVersion++;
+  state.loadVersion++;
+  state.loadingId = null;
+  try { await forgetArchivedSessions(archivePath); }
+  catch { warnCacheUnavailable(); }
+  for (const [name, link] of state.directoryLinks) {
+    if (!matches(link.path)) continue;
+    state.directoryLinks.delete(name);
+    state.cachedSessions.delete(link.id);
+    temporaryTexts.delete(link.id);
+  }
+  state.directoryFiles = state.directoryFiles.filter((file) => !matches(file.path));
+  if (currentDeleted) resetCurrentSession();
+  if (state.libraryFilter !== 'all' && !state.directoryFiles.some((file) => directoryGroup(file) === state.libraryFilter)) setLibraryFilter('all');
+  await refreshDirectory();
 }
 
 function resetCurrentSession() {
@@ -709,7 +825,7 @@ function openDeleteDialog() {
 async function confirmDeleteSession() {
   if (!deleteTarget || deleting) return;
   const target = deleteTarget;
-  const index = state.sessions.findIndex((session) => session.id === target.id);
+  const index = filteredLibrary().findIndex((session) => session.id === target.id);
   deleting = true;
   state.selectionVersion++;
   state.loadVersion++;
@@ -736,7 +852,8 @@ async function confirmDeleteSession() {
     renderLibrary();
     $('#delete-dialog').close();
     if (wasCurrent) {
-      const next = state.sessions[Math.max(0, Math.min(index, state.sessions.length - 1))];
+      const remaining = filteredLibrary();
+      const next = remaining[Math.max(0, Math.min(index, remaining.length - 1))];
       if (next) await selectSession(next.id, { automatic: true });
       $('#reader').focus({ preventScroll: true });
     }
@@ -806,8 +923,10 @@ function moveBlock(step) {
 
 function scrollToEdge(bottom) {
   const reader = $('#reader');
+  const last = bottom ? readingBlocks().at(-1) : null;
+  if (bottom && !last) return;
   const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth';
-  reader.scrollTo({ top: bottom ? reader.scrollHeight : 0, behavior });
+  reader.scrollTo({ top: bottom ? blockScrollTop(last, reader) : 0, behavior });
 }
 
 function updateProgress() {
@@ -816,8 +935,9 @@ function updateProgress() {
   $('#reading-progress').textContent = `${distance > 1 ? Math.round(reader.scrollTop / distance * 100) : state.current ? 100 : 0}%`;
   const blocks = readingBlocks();
   const hasBlocks = Boolean(state.current && blocks.length);
+  const lastBlockTop = hasBlocks ? blockScrollTop(blocks.at(-1), reader) : 0;
   $('#scroll-top').disabled = !hasBlocks || reader.scrollTop <= 1;
-  $('#scroll-bottom').disabled = !hasBlocks || reader.scrollTop >= distance - 1;
+  $('#scroll-bottom').disabled = !hasBlocks || Math.abs(reader.scrollTop - lastBlockTop) <= 1;
   $('#previous-block').disabled = !hasBlocks || reader.scrollTop <= blockScrollTop(blocks[0], reader) + 1;
   $('#next-block').disabled = !hasBlocks || reader.scrollTop >= blockScrollTop(blocks.at(-1), reader) - 1;
   const top = reader.getBoundingClientRect().top;
@@ -839,6 +959,8 @@ $('.brand').addEventListener('click', (event) => {
 });
 $('#file-input').addEventListener('change', (event) => queueImport(event.target.files));
 $('#refresh-files').addEventListener('click', () => refreshDirectory());
+$('#session-date-filter').addEventListener('change', (event) => setLibraryFilter(event.target.value));
+$('#reset-library-filter').addEventListener('click', () => { setLibraryFilter('all'); $('#session-date-filter').focus(); });
 $('#load-more-sessions').addEventListener('click', () => { state.libraryLimit += LIBRARY_PAGE_SIZE; renderLibrary(); });
 $('#dismiss-error').addEventListener('click', clearError);
 $('#cancel-delete').addEventListener('click', () => { if (!deleting) $('#delete-dialog').close(); });
@@ -922,7 +1044,7 @@ window.addEventListener('resize', scheduleProgress);
 new ResizeObserver(scheduleProgress).observe($('#reader-content'));
 
 document.addEventListener('keydown', (event) => {
-  if ($('#delete-dialog').open) return;
+  if (document.querySelector('dialog[open]')) return;
   const editing = event.target.matches('input, textarea, select, [contenteditable="true"]');
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' || !editing && event.key === '/') {
     event.preventDefault(); $('#search-input').focus(); $('#search-input').select();
@@ -932,7 +1054,7 @@ document.addEventListener('keydown', (event) => {
 });
 document.addEventListener('dragenter', (event) => {
   if (!event.dataTransfer?.types.includes('Files')) return;
-  if ($('#delete-dialog').open) { event.preventDefault(); return; }
+  if (document.querySelector('dialog[open]')) { event.preventDefault(); return; }
   event.preventDefault(); dragDepth++; $('#drop-overlay').hidden = false;
 });
 document.addEventListener('dragover', (event) => {
@@ -945,7 +1067,7 @@ document.addEventListener('dragleave', (event) => {
 });
 document.addEventListener('drop', (event) => {
   if (!event.dataTransfer?.types.includes('Files')) return;
-  if ($('#delete-dialog').open) { event.preventDefault(); return; }
+  if (document.querySelector('dialog[open]')) { event.preventDefault(); return; }
   event.preventDefault(); dragDepth = 0; $('#drop-overlay').hidden = true;
   queueImport(event.dataTransfer.files);
 });
@@ -955,6 +1077,8 @@ $('#open-file kbd').textContent = isMac ? '⌘ O' : 'Ctrl O';
 $('#search-shortcut').textContent = isMac ? '⌘ K' : 'Ctrl K';
 updateTheme();
 updateViewControl();
+setupSidebarResize({ sidebar: $('#sidebar'), handle: $('#sidebar-resizer'), storage, onResize: scheduleProgress });
+const archiveManager = setupArchiveManager({ trigger: $('#manage-sessions'), getCurrentPath: currentArchivePath, onDelete: archiveDeleted, formatSize: bytes });
 renderEmpty({ loading: true });
 const cacheReady = restoreCache();
 async function startReader() {

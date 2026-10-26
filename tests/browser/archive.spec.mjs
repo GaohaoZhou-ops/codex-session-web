@@ -26,6 +26,7 @@ test('existing batch import saves raw bytes and is readable from a browser with 
   const days = await readdir(path.join(sessionDirectory, 'sessions'));
   expect(days).toHaveLength(1);
   expect(days[0]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  await expect(page.locator(`.session-group[data-group="${days[0]}"] .session-item`)).toHaveCount(2);
   const day = path.join(sessionDirectory, 'sessions', days[0]);
   expect(await readFile(path.join(day, 'archived.md'))).toEqual(original);
   expect(await readFile(path.join(day, 'headerless.txt'))).toEqual(headerless);
@@ -63,23 +64,26 @@ test('files copied into the script-created directory appear through the existing
   await expect(page.locator('.message-assistant')).toContainText('复制后的新内容');
 });
 
-test('disk-save failure keeps the import readable and can be retried with the same file picker', async ({ page, sessionDirectory }) => {
+test('disk-save failure preserves the current reader and requires a successful archive before adding an import', async ({ page, sessionDirectory }) => {
   await openReader(page);
   const archive = path.join(sessionDirectory, 'sessions');
   await writeFile(archive, 'blocks directory creation');
   const upload = () => page.locator('#file-input').setInputFiles({ name: 'retry.md', mimeType: 'text/markdown', buffer: original });
   await upload();
-  await expect(page.locator('.conversation-filename')).toContainText('retry.md');
-  await expect(page.locator('.message-assistant')).toContainText('归档回答');
-  await expect(page.getByRole('alert')).toContainText('保存到会话目录失败');
+  await expect(page.getByRole('alert')).toContainText('归档失败，未加入会话列表');
+  await expect(page.locator('.conversation-filename')).toContainText('codex-session-demo.md');
+  await expect(page.locator('.session-item[title="retry.md"]')).toHaveCount(0);
   await rm(archive);
   const saved = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().includes('/api/session?'));
   await upload();
   expect((await saved).ok()).toBe(true);
+  await expect(page.locator('.conversation-filename')).toContainText('retry.md');
   await expect(page.locator('#reader')).toHaveAttribute('aria-busy', 'false');
   await expect(page.getByRole('alert')).toBeHidden();
   await page.getByRole('button', { name: '刷新文件列表' }).click();
   await expect(page.locator('.session-item[title="retry.md"]')).toHaveCount(1);
   const [day] = await readdir(archive);
+  await expect(page.locator(`.session-group[data-group="${day}"] .session-item`)).toHaveAttribute('title', 'retry.md');
+  await expect(page.locator('.session-group[data-group="cache"]')).toHaveCount(0);
   expect(await readFile(path.join(archive, day, 'retry.md'))).toEqual(original);
 });

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { MAX_FILE_BYTES } from './src/parser.js';
-import { listSessionFiles, readSessionFile, saveSessionFile, validateFilename } from './src/session-files.js';
+import { deleteArchivePath, listArchiveDays, listSessionFiles, readSessionFile, saveSessionFile, validateFilename } from './src/session-files.js';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
@@ -51,14 +51,19 @@ export function createReaderServer({ directory = ROOT, host = '127.0.0.1', now =
         const session = await saveSessionFile(directory, name, await readUpload(request), uploadedAt);
         return reply(200, { session });
       }
+      if (url.pathname === '/api/archive' && request.method === 'DELETE') {
+        if (request.headers['content-type'] !== 'application/json') return reply(415, { error: '请通过归档管理删除文件。' });
+        return reply(200, await deleteArchivePath(directory, url.searchParams.get('path')));
+      }
       if (!['GET', 'HEAD'].includes(request.method)) {
-        response.setHeader('Allow', url.pathname === '/api/session' ? 'GET, HEAD, POST' : 'GET, HEAD');
+        response.setHeader('Allow', url.pathname === '/api/session' ? 'GET, HEAD, POST' : url.pathname === '/api/archive' ? 'GET, HEAD, DELETE' : 'GET, HEAD');
         return reply(405, { error: '只支持读取。' });
       }
       if (url.pathname === '/api/health') return reply(200, { app: 'codex-session-reader', project, pid: process.pid });
       if (url.pathname === '/api/sessions') {
         return reply(200, { sessions: await listSessionFiles(directory) });
       }
+      if (url.pathname === '/api/archive') return reply(200, { days: await listArchiveDays(directory) });
       if (url.pathname === '/api/session') {
         return reply(200, await readSessionFile(directory, url.searchParams.get('name')), 'text/plain; charset=utf-8');
       }
@@ -73,7 +78,7 @@ export function createReaderServer({ directory = ROOT, host = '127.0.0.1', now =
       return reply(200, await readFile(file), MIME[path.extname(file)]);
     } catch (error) {
       const status = error.status || (['ENOENT', 'ELOOP', 'ENOTDIR'].includes(error.code) ? 404 : error instanceof URIError || error instanceof TypeError ? 400 : 500);
-      reply(status, { error: error.status ? error.message : status === 404 ? '文件不存在。' : status === 400 ? '请求格式不正确。' : request.method === 'POST' ? '保存失败，请检查目录权限和磁盘空间后重试。' : '读取失败，请检查文件权限后重试。' });
+      reply(status, { error: error.status ? error.message : status === 404 ? '文件不存在。' : status === 400 ? '请求格式不正确。' : request.method === 'DELETE' ? '删除失败，请检查目录权限后重试。' : request.method === 'POST' ? '保存失败，请检查目录权限和磁盘空间后重试。' : '读取失败，请检查文件权限后重试。' });
     }
   });
 }

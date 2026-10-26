@@ -1,5 +1,6 @@
 import { test, expect } from './fixtures.mjs';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, utimes, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 
 const original = '\uFEFF# Codex conversation\r\n\r\n## User\r\n缓存恢复问题\r\n## Assistant\r\n缓存恢复回答\r\n';
 
@@ -113,10 +114,18 @@ test('deduplicates renamed imports and updates one filename without losing its d
   expect(await cacheSummary(page)).toEqual(after);
 });
 
-test('large cached libraries read only the active body and render file rows in batches', async ({ page }) => {
+test('large archived libraries read only the active cached body and render file rows in batches', async ({ page, sessionDirectory }) => {
   await trackBodyAccess(page);
   await openReader(page);
+  const folder = path.join(sessionDirectory, 'sessions/2026-10-25');
+  await mkdir(folder, { recursive: true });
+  await Promise.all(Array.from({ length: 125 }, async (_, index) => {
+    const file = path.join(folder, `cached-${index}.md`);
+    await writeFile(file, `## User\nQuestion ${index}\n## Assistant\nAnswer ${index}`);
+    await utimes(file, new Date(2026, 9, 25, 0, index), new Date(2026, 9, 25, 0, index));
+  }));
   const ids = await page.evaluate(async () => {
+    const { sessions: directoryFiles } = await (await fetch('/api/sessions')).json();
     const files = await Promise.all(Array.from({ length: 125 }, async (_, index) => {
       const text = `## User\nQuestion ${index}\n## Assistant\nAnswer ${index}`;
       const buffer = new TextEncoder().encode(text);
@@ -128,10 +137,11 @@ test('large cached libraries read only the active body and render file rows in b
       const request = indexedDB.open('codex-reader-sessions');
       request.onsuccess = () => {
         const database = request.result;
-        const transaction = database.transaction(['sessions', 'contents'], 'readwrite');
+        const transaction = database.transaction(['sessions', 'contents', 'directories'], 'readwrite');
         for (const { text, ...metadata } of files) {
           transaction.objectStore('sessions').add(metadata);
           transaction.objectStore('contents').add({ id: metadata.id, text });
+          transaction.objectStore('directories').put({ ...directoryFiles.find((file) => file.name === metadata.name), id: metadata.id });
         }
         transaction.oncomplete = () => { database.close(); resolve(); };
         transaction.onabort = () => { database.close(); reject(transaction.error); };
@@ -161,7 +171,7 @@ test('large cached libraries read only the active body and render file rows in b
   expect(requests).toEqual([]);
 });
 
-test('directory files share the cache, update on refresh and remain readable when removed', async ({ page }) => {
+test('directory files share the cache, update on refresh and clear unarchived cache entries when removed', async ({ page }) => {
   const fixture = await readFile(new URL('../fixtures/codex-session-demo.md', import.meta.url), 'utf8');
   await openReader(page);
   await upload(page, fixture, 'a-copy.md');
@@ -187,12 +197,49 @@ test('directory files share the cache, update on refresh and remain readable whe
   await page.route('**/api/session?*', (route) => route.fulfill({ contentType: 'text/plain; charset=utf-8', body: latest }));
   await page.reload();
   await expect(page.locator('.message-assistant').last()).toContainText('Latest answer');
-  expect((await cacheSummary(page)).contents).toBe(2);
+  expect((await cacheSummary(page)).contents).toBe(1);
   await page.route('**/api/sessions', (route) => route.fulfill({ json: { sessions: [] } }));
   await page.reload();
-  await expect(page.locator('.message-assistant')).toContainText('Latest answer');
-  await expect(page.locator('#session-count')).toHaveText('2');
+  await expect(page.locator('#refresh-files')).toBeEnabled();
+  await expect(page.locator('.message-assistant')).toHaveCount(0);
+  await expect(page.locator('#session-count')).toHaveText('0');
+  expect((await cacheSummary(page)).contents).toBe(0);
   expect(requests).toHaveLength(2);
+});
+
+test('unarchived cache records and bodies are cleared only after a successful directory scan', async ({ page }) => {
+  await openReader(page);
+  const orphanId = await page.evaluate(async () => {
+    const text = '## User\n只有缓存，没有归档文件';
+    const buffer = new TextEncoder().encode(text);
+    const hash = await crypto.subtle.digest('SHA-256', buffer);
+    const id = `sha256:${Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+    await new Promise((resolve, reject) => {
+      const request = indexedDB.open('codex-reader-sessions');
+      request.onsuccess = () => {
+        const database = request.result;
+        const transaction = database.transaction(['sessions', 'contents'], 'readwrite');
+        transaction.objectStore('sessions').put({ id, name: 'orphan.md', names: ['orphan.md'], size: buffer.length, savedAt: Date.now() });
+        transaction.objectStore('contents').put({ id, text });
+        transaction.oncomplete = () => { database.close(); resolve(); };
+        transaction.onabort = () => { database.close(); reject(transaction.error); };
+      };
+      request.onerror = () => reject(request.error);
+    });
+    return id;
+  });
+  await page.route('**/api/sessions', (route) => route.fulfill({ status: 503, json: { error: 'Offline' } }));
+  await page.reload();
+  await expect(page.locator('#refresh-files')).toBeEnabled();
+  expect((await cacheSummary(page)).contents).toBe(2);
+  await expect(page.locator('.session-group[data-group="cache"]')).toHaveCount(0);
+  await page.unroute('**/api/sessions');
+  await page.getByRole('button', { name: '刷新文件列表' }).click();
+  await expect(page.locator('#refresh-files')).toBeEnabled();
+  const cache = await cacheSummary(page);
+  expect(cache.contents).toBe(1);
+  expect(cache.sessions.some((session) => session.id === orphanId)).toBe(false);
+  await expect(page.locator('.conversation-filename')).toHaveText('codex-session-demo.md');
 });
 
 test('batch imports cache each distinct file and reopen unselected files on demand', async ({ page }) => {
@@ -570,10 +617,15 @@ test('simultaneous updates of one filename keep one committed version across tab
   await expect(other.locator('.message-assistant')).toContainText(await page.locator('.message-assistant .message-body').innerText());
 });
 
-test('upgrades existing caches without losing bodies and consolidates legacy same-name versions on import', async ({ page }) => {
+test('upgrades existing caches without losing archived bodies and consolidates legacy same-name versions on import', async ({ page, sessionDirectory }) => {
+  const folder = path.join(sessionDirectory, 'sessions/2026-10-25');
+  await mkdir(folder, { recursive: true });
+  await writeFile(path.join(folder, 'legacy.md'), '## User\n旧会话一');
+  await writeFile(path.join(folder, 'keep.md'), '## User\n保留的另一个会话');
   await page.route('**/assets/app.js', (route) => route.abort());
   await page.goto('/');
   const oldIds = await page.evaluate(async () => {
+    const { sessions: directoryFiles } = await (await fetch('/api/sessions')).json();
     const files = await Promise.all([
       { name: 'legacy.md', text: '## User\n旧会话一' },
       { name: 'legacy.md', text: '## User\n旧会话二' },
@@ -592,10 +644,13 @@ test('upgrades existing caches without losing bodies and consolidates legacy sam
       request.onerror = () => reject(request.error);
       request.onsuccess = () => {
         const database = request.result;
-        const transaction = database.transaction(['sessions', 'contents'], 'readwrite');
+        const transaction = database.transaction(['sessions', 'contents', 'directories'], 'readwrite');
+        const linked = new Set();
         for (const { text, ...metadata } of files) {
           transaction.objectStore('sessions').add(metadata);
           transaction.objectStore('contents').add({ id: metadata.id, text });
+          if (!linked.has(metadata.name)) transaction.objectStore('directories').put({ ...directoryFiles.find((file) => file.name === metadata.name), id: metadata.id });
+          linked.add(metadata.name);
         }
         transaction.oncomplete = () => { database.close(); resolve(); };
         transaction.onabort = () => { database.close(); reject(transaction.error); };

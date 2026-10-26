@@ -127,6 +127,46 @@ test('does not read or write through archive, date-directory, or file symlinks',
   assert.deepEqual(await readFile(path.join(outside, 'private.md')), content);
 });
 
+test('archive tree retains historical same-name paths and deletion targets one file or one day', async (context) => {
+  let date = new Date(2026, 9, 25);
+  const { directory, url, upload } = await setup(context, () => date);
+  await writeFile(path.join(directory, 'root.md'), content);
+  await upload('shared.md');
+  date = new Date(2026, 9, 26);
+  const updated = Buffer.from('## User\n新版本');
+  await upload('shared.md', updated);
+  await upload('second.md');
+  const { days } = await (await fetch(`${url}/api/archive`)).json();
+  assert.deepEqual(days.map((day) => day.day), ['2026-10-26', '2026-10-25']);
+  assert.deepEqual(days.map((day) => day.files.length), [2, 1]);
+  const remove = (archivePath) => fetch(`${url}/api/archive?path=${encodeURIComponent(archivePath)}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+  assert.equal((await remove('sessions/2026-10-25/shared.md')).status, 200);
+  assert.deepEqual(await readFile(path.join(directory, 'sessions/2026-10-26/shared.md')), updated);
+  assert.equal((await remove('sessions/2026-10-26')).status, 200);
+  await assert.rejects(() => stat(path.join(directory, 'sessions/2026-10-26')), { code: 'ENOENT' });
+  assert.deepEqual(await readFile(path.join(directory, 'root.md')), content);
+  assert.equal((await remove('sessions/2026-10-26')).status, 404);
+});
+
+test('archive deletion rejects traversal, symlinks, cross-origin requests and unsupported types', async (context) => {
+  const { directory, url, upload } = await setup(context, () => new Date(2026, 9, 25));
+  await upload('keep.md');
+  const remove = (archivePath, headers = {}) => fetch(`${url}/api/archive?path=${encodeURIComponent(archivePath)}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json', ...headers } });
+  for (const target of ['sessions', 'sessions/today.sh', 'sessions/2026-10-25/../../root.md', '../sessions/2026-10-25', 'sessions/2026-10-25/nested/file.md']) assert.equal((await remove(target)).status, 400);
+  assert.equal((await remove('sessions/2026-10-25/keep.md', { Origin: 'https://unrelated.example' })).status, 403);
+  assert.equal((await remove('sessions/2026-10-25/keep.md', { 'Content-Type': 'text/plain' })).status, 415);
+  const outside = path.join(directory, 'outside');
+  await mkdir(outside);
+  await writeFile(path.join(outside, 'private.md'), content);
+  await symlink(outside, path.join(directory, 'sessions/2026-10-24'));
+  await symlink(path.join(outside, 'private.md'), path.join(directory, 'sessions/2026-10-25/linked.md'));
+  assert.equal((await remove('sessions/2026-10-24')).status, 404);
+  assert.equal((await remove('sessions/2026-10-25/linked.md')).status, 409);
+  assert.deepEqual(await readFile(path.join(outside, 'private.md')), content);
+  assert.equal((await remove('sessions/2026-10-25')).status, 200);
+  assert.deepEqual(await readFile(path.join(outside, 'private.md')), content);
+});
+
 test('today.sh works from any cwd, creates one date directory concurrently, and prints only its name', async (context) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'codex archive script '));
   context.after(() => rm(directory, { recursive: true, force: true }));

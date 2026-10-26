@@ -97,6 +97,41 @@ export async function listSessionFiles(root) {
   return scan(path.resolve(root));
 }
 
+export async function listArchiveDays(root) {
+  root = path.resolve(root);
+  const days = [];
+  for (const directory of await exportDirectories(root)) {
+    if (directory === root || !await isDirectory(directory)) continue;
+    const files = [];
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (!entry.isFile() || !EXPORT_EXTENSION.test(entry.name)) continue;
+      try {
+        validateFilename(entry.name);
+        const info = await lstat(path.join(directory, entry.name));
+        if (info.isFile()) files.push(metadata(root, directory, entry.name, info));
+      } catch (error) { if (error.code !== 'ENOENT' && !error.status) throw error; }
+    }
+    files.sort((a, b) => a.name.localeCompare(b.name));
+    days.push({ day: path.basename(directory), path: `sessions/${path.basename(directory)}`, files });
+  }
+  return days.sort((a, b) => b.day.localeCompare(a.day));
+}
+
+export async function deleteArchivePath(root, archivePath) {
+  const match = /^sessions\/(\d{4}-\d{2}-\d{2})(?:\/([^/]+))?$/.exec(archivePath || '');
+  if (!match) throw fileError('只能删除归档日期目录或其中的会话文件。', 400);
+  const [, day, name] = match;
+  if (name) validateFilename(name);
+  root = path.resolve(root);
+  const archive = path.join(root, 'sessions');
+  const directory = path.join(archive, day);
+  if (!await isDirectory(archive) || !await isDirectory(directory)) throw fileError('归档目录不存在或不是普通目录。', 404);
+  const target = name ? path.join(directory, name) : directory;
+  if (name && !(await lstat(target)).isFile()) throw fileError('只能删除普通会话文件。', 409);
+  await rm(target, { recursive: !name });
+  return { deleted: archivePath };
+}
+
 export async function readSessionFile(root, name) {
   validateFilename(name);
   root = path.resolve(root);
