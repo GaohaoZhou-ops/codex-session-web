@@ -8,6 +8,8 @@ node_modules/
 /.npm/
 /logs/
 /report.*.json
+# Default Node diagnostic report names, including reports in subdirectories.
+report.[0-9]*.json
 *.log
 *.log.*
 *.pid

@@ -5,7 +5,7 @@ import { icon } from './icons.js';
 const THEMES = [
   { value: 'light', label: '浅色模式', icon: 'sun', description: '明亮底色 · 清新绿调' },
   { value: 'dark', label: '深色模式', icon: 'moon', description: '深色底色 · 柔和绿调' },
-  { value: 'dusk', label: '暮色模式', icon: 'sunset', description: '暗色底色 · 彩虹分区' },
+  { value: 'dusk', label: '暮色模式', icon: 'sunset', description: '蓝灰底色 · 柔和彩色' },
 ];
 
 function themePreview(theme) {
