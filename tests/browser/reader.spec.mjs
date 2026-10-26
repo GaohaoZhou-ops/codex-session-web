@@ -225,7 +225,8 @@ test('works at mobile width with an off-canvas directory and no horizontal page 
 
 test('remembers appearance and supports keyboard search', async ({ page }) => {
   await openReader(page);
-  await page.getByRole('button', { name: '切换深色模式' }).click();
+  await page.getByRole('combobox', { name: '界面主题' }).click();
+  await page.getByRole('option', { name: '深色模式', exact: true }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');

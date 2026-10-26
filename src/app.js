@@ -6,6 +6,7 @@ import { deleteCachedSession, findCachedSession, forgetArchivedSessions, planSes
 import { formatSessionTime, sessionStartTime } from './session-time.js';
 import { setupSidebarResize } from './sidebar-resize.js';
 import { setupArchiveManager } from './archive-manager.js';
+import { setupThemePicker, themePickerMarkup } from './theme-picker.js';
 
 const $ = (selector) => document.querySelector(selector);
 const storage = {
@@ -19,7 +20,7 @@ const VIEW_MODES = [
   { value: 'compact', label: '精简视图', description: '只看提问与本轮最后回复', icon: 'book' },
   { value: 'full', label: '完整记录', description: '展开全部工具活动与输出', icon: 'terminal' },
 ];
-const state = { sessions: [], directoryFiles: [], directoryScanned: false, cachedSessions: new Map(), directoryLinks: new Map(), libraryFilter: storage.get('library-filter') || 'all', libraryLimit: LIBRARY_PAGE_SIZE, current: null, loadingId: null, selectionVersion: 0, view: storage.get('view') || 'conversation', query: '', matches: [], matchIndex: -1, loadVersion: 0, theme: storage.get('theme') || 'light', messageElements: new Map(), groupElements: new Map(), activeId: null };
+const state = { sessions: [], directoryFiles: [], directoryScanned: false, cachedSessions: new Map(), directoryLinks: new Map(), libraryFilter: storage.get('library-filter') || 'all', libraryLimit: LIBRARY_PAGE_SIZE, current: null, loadingId: null, selectionVersion: 0, view: storage.get('view') || 'conversation', query: '', matches: [], matchIndex: -1, loadVersion: 0, messageElements: new Map(), groupElements: new Map(), activeId: null };
 // File bodies normally live only in IndexedDB and in the active reader. This
 // fallback keeps reading usable when storage is disabled or its quota is full.
 const temporaryTexts = new Map();
@@ -38,7 +39,6 @@ let toastTimeout;
 let searchTimeout;
 let dragDepth = 0;
 
-document.documentElement.dataset.theme = state.theme;
 $('#app').innerHTML = `
   <div class="app-shell">
     <button class="sidebar-backdrop" id="sidebar-backdrop" aria-label="关闭侧栏" hidden></button>
@@ -72,7 +72,7 @@ $('#app').innerHTML = `
         <div class="breadcrumb"><button class="icon-button mobile-menu" id="menu-toggle" aria-label="打开侧栏" aria-expanded="false">${icon('menu')}</button><span class="breadcrumb-icon">${icon('folder')}</span><span>工作区</span><span class="breadcrumb-slash">/</span><strong>会话阅读器</strong></div>
         <div class="topbar-actions">
           <span class="local-badge"><span class="status-dot"></span>LOCAL</span>
-          <button class="theme-toggle" id="theme-toggle" type="button" aria-label="切换深色模式" title="切换深色模式"></button>
+          ${themePickerMarkup()}
         </div>
       </header>
       <div class="reader-toolbar">
@@ -129,15 +129,6 @@ function setSidebar(open) {
   $('#sidebar-backdrop').hidden = !open;
   $('#menu-toggle').setAttribute('aria-expanded', String(open));
 }
-function updateTheme() {
-  document.documentElement.dataset.theme = state.theme;
-  const nextTheme = state.theme === 'dark' ? '浅色模式' : '深色模式';
-  $('#theme-toggle').innerHTML = `${icon(state.theme === 'dark' ? 'sun' : 'moon')}<span>${nextTheme}</span>`;
-  const label = `切换${nextTheme}`;
-  $('#theme-toggle').setAttribute('aria-label', label);
-  $('#theme-toggle').title = label;
-}
-
 let viewOptionIndex = 0;
 function focusViewOption(index) {
   viewOptionIndex = (index + VIEW_MODES.length) % VIEW_MODES.length;
@@ -967,7 +958,6 @@ $('#cancel-delete').addEventListener('click', () => { if (!deleting) $('#delete-
 $('#confirm-delete').addEventListener('click', confirmDeleteSession);
 $('#delete-dialog').addEventListener('cancel', (event) => { if (deleting) event.preventDefault(); });
 $('#delete-dialog').addEventListener('close', () => { deleteTarget = null; });
-$('#theme-toggle').addEventListener('click', () => { state.theme = state.theme === 'dark' ? 'light' : 'dark'; storage.set('theme', state.theme); updateTheme(); });
 $('#menu-toggle').addEventListener('click', () => setSidebar(!$('#sidebar').classList.contains('is-open')));
 $('#sidebar-backdrop').addEventListener('click', () => setSidebar(false));
 $('#view-mode').addEventListener('click', () => setViewMenu($('#view-options').hidden));
@@ -1075,7 +1065,7 @@ document.addEventListener('drop', (event) => {
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 $('#open-file kbd').textContent = isMac ? '⌘ O' : 'Ctrl O';
 $('#search-shortcut').textContent = isMac ? '⌘ K' : 'Ctrl K';
-updateTheme();
+setupThemePicker({ storage });
 updateViewControl();
 setupSidebarResize({ sidebar: $('#sidebar'), handle: $('#sidebar-resizer'), storage, onResize: scheduleProgress });
 const archiveManager = setupArchiveManager({ trigger: $('#manage-sessions'), getCurrentPath: currentArchivePath, onDelete: archiveDeleted, formatSize: bytes });

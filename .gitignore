@@ -12,6 +12,9 @@ node_modules/
 *.log.*
 *.pid
 *.pid.lock
+*.heapsnapshot
+*.heapprofile
+*.cpuprofile
 
 # Test reports and coverage.
 /test-results/
@@ -24,6 +27,11 @@ node_modules/
 /.local-browsers/
 /coverage/
 /.nyc_output/
+
+# Local browser debugging output; documentation images remain trackable.
+/artifacts/
+/screenshots/
+/traces/
 
 # Local environment values; keep shareable templates trackable.
 .env
@@ -45,9 +53,12 @@ codex-session-*.[mM][aA][rR][kK][dD][oO][wW][nN]
 codex-session-*.[tT][xX][tT]
 codex-session-*.[jJ][sS][oO][nN][lL]
 rollout-*.[jJ][sS][oO][nN][lL]
-# Deliberate test fixtures remain trackable.
-!/tests/fixtures/**/codex-session-*
-!/tests/fixtures/**/rollout-*
+# Deliberate test exports remain trackable without exempting logs or profiles.
+!/tests/fixtures/**/codex-session-*.[mM][dD]
+!/tests/fixtures/**/codex-session-*.[mM][aA][rR][kK][dD][oO][wW][nN]
+!/tests/fixtures/**/codex-session-*.[tT][xX][tT]
+!/tests/fixtures/**/codex-session-*.[jJ][sS][oO][nN][lL]
+!/tests/fixtures/**/rollout-*.[jJ][sS][oO][nN][lL]
 
 # Editor, OS, and temporary files.
 /tmp/
