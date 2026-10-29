@@ -1,12 +1,13 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, openSync, closeSync, appendFileSync } from 'node:fs';
-import { readFile, readlink, rename, rm, writeFile } from 'node:fs/promises';
+import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { processIdentity as identifyProcess } from './process-identity.mjs';
 
-// Entry scripts hold an exclusive flock for the whole operation. The detached
+// Entry scripts hold an exclusive OS file lock for the whole operation. The detached
 // server inherits only stdin/stdout/stderr, so it cannot keep that lock alive.
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SERVER = path.join(ROOT, 'server.mjs');
@@ -35,31 +36,13 @@ async function health(config) {
   } catch { return null; }
 }
 
-async function processIdentity(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 1) return null;
-  try {
-    const [stat, command, cwd, executable] = await Promise.all([
-      readFile(`/proc/${pid}/stat`, 'utf8'),
-      readFile(`/proc/${pid}/cmdline`, 'utf8'),
-      readlink(`/proc/${pid}/cwd`),
-      readlink(`/proc/${pid}/exe`),
-    ]);
-    // /proc stat field 2 can contain spaces and parentheses. Field 22 is the
-    // process start time and distinguishes a stale PID from a reused one.
-    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(/\s+/);
-    const args = command.split('\0');
-    if (['Z', 'X'].includes(fields[0]) || !/^node(?:js)?$/.test(path.basename(executable))) return null;
-    if (!args[1] || path.resolve(cwd, args[1]) !== SERVER) return null;
-    return { pid, startTicks: fields[19] };
-  } catch (error) {
-    if (['ENOENT', 'ESRCH', 'EACCES'].includes(error.code)) return null;
-    throw error;
-  }
-}
+const processIdentity = (pid) => identifyProcess(pid, SERVER);
 
 async function matchesProcess(record) {
   const identity = await processIdentity(record.pid);
-  return Boolean(identity && identity.startTicks === record.startTicks);
+  // Continue managing records written by the original WSL version.
+  const startId = record.startId ?? (/^\d+$/.test(record.startTicks || '') ? `linux:${record.startTicks}` : null);
+  return Boolean(identity && identity.startId === startId);
 }
 
 async function save(record) {
@@ -71,7 +54,7 @@ async function save(record) {
 async function readRecord() {
   try {
     const record = JSON.parse(await readFile(STATE, 'utf8'));
-    if (record.project === PROJECT && Number.isSafeInteger(record.pid) && record.pid > 1 && typeof record.startTicks === 'string' && /^\d+$/.test(record.startTicks) && typeof record.host === 'string' && Number.isInteger(record.port) && record.port > 0 && record.port < 65536 && await matchesProcess(record)) return record;
+    if (record?.project === PROJECT && Number.isSafeInteger(record.pid) && record.pid > 1 && typeof record.host === 'string' && Number.isInteger(record.port) && record.port > 0 && record.port < 65536 && await matchesProcess(record)) return record;
     console.log('已清理过期的进程记录。');
   } catch (error) {
     if (error.code === 'ENOENT') return null;
@@ -153,8 +136,16 @@ async function start() {
     await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
   } finally { closeSync(logFd); }
   child.unref();
-  const identity = await processIdentity(child.pid);
-  if (!identity) throw new Error(`服务未能启动，请查看 ${LOG}。`);
+  let identity;
+  try {
+    identity = await processIdentity(child.pid);
+    if (!identity) throw new Error(`服务启动失败，无法确认进程身份，请查看 ${LOG}。`);
+  } catch (error) {
+    // This is our freshly spawned child, with no saved identity yet. Do not
+    // leave an unmanaged server behind when inspection fails.
+    child.kill('SIGTERM');
+    throw error;
+  }
   const record = { ...config, ...identity, project: PROJECT, managed: true };
   try {
     await save(record);

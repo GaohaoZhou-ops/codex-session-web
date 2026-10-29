@@ -24,7 +24,10 @@
 
 ## 🚀 快速开始
 
-需要 **Node.js 20 或更新版本、npm 和 Git**。后台管理脚本适用于 **Linux / WSL**，需要 Bash 和 `flock`，Ubuntu 默认提供；也可以使用下面的 `npm start` 在前台运行。
+支持 **WSL 和 macOS**，需要 **Node.js 20 或更新版本、npm 和 Git**。两个平台使用相同的启动、停止和状态查询命令：
+
+- **WSL**：在 WSL 终端内安装依赖和运行脚本，需要 Bash 和 `flock`（Ubuntu 通常已提供；缺少时安装 `util-linux`）。
+- **macOS**：在终端中运行，使用系统自带的 Bash、`lockf`、`ps` 和 `lsof`，无需额外安装 `flock` 或 GNU 工具。
 
 ```bash
 git clone git@github.com:GaohaoZhou-ops/codex-session-web.git
@@ -34,6 +37,8 @@ npm ci
 ```
 
 浏览器打开 **http://127.0.0.1:4173**。在 WSL 中启动后，也可以用 Windows 浏览器访问 **http://localhost:4173**。
+
+在 WSL 与 Mac 之间复制工程后，请在目标平台重新执行 `npm ci`，不要复用另一平台的 `node_modules`（构建工具包含平台相关的二进制文件）或 `.run` 运行记录。已归档的 `sessions/日期/` 文件可以直接复制使用。
 
 服务启动时会构建前端。页面显示 `sessions/日期/` 中的会话，兼容项目根目录中的旧导出，并通过缓存自动恢复上次打开的会话；没有会话时显示导入入口。成功扫描目录后自动清理没有对应磁盘文件的旧缓存。
 
@@ -55,7 +60,7 @@ npm start            # 自动构建并启动服务，按 Ctrl+C 停止
 ./scripts/stop.sh      # 停止服务；重复停止也可正常退出
 ```
 
-脚本可从任意工作目录调用，会自动定位到项目根目录。日志保存在 `.run/service.log`，进程和监听地址保存在 `.run/service.json`；这些运行文件不会提交到 Git。`status` 的退出码为 `0`（正常运行）、`3`（未运行）、`1`（异常）。
+脚本可从任意工作目录调用，会自动定位到项目根目录，也支持路径中包含空格、中文或通过目录符号链接调用。日志保存在 `.run/service.log`，进程和监听地址保存在 `.run/service.json`；这些运行文件不会提交到 Git。`status` 的退出码为 `0`（正常运行）、`3`（未运行）、`1`（异常）。
 
 默认使用 `4173` 端口。重复或并发执行 `start` 会复用现有进程；即使后来改变 `PORT`，也不会为已有的受管实例重复开服务。更换端口时，先停止再启动：
 
@@ -67,6 +72,8 @@ PORT=4321 ./scripts/start.sh
 ```
 
 启动失败时可查看 `tail -n 50 .run/service.log`。停止前会核对进程的启动时间和入口文件，过期 PID 记录不会导致其他进程被误停。也可以继续使用 `npm start` 在前台运行，按 `Ctrl+C` 停止；脚本能识别同一项目、同一端口通过 `npm start` 启动的服务，自定义端口且没有进程记录时需传入相同的 `PORT`。
+
+服务管理会自动选择平台实现：WSL 使用 `flock` 和 `/proc`，macOS 使用 `lockf`、`ps` 和 `lsof`。两者都保留并发启动互斥和停止前的身份校验；原 WSL 版本生成的进程记录仍可读取。
 
 ## 🔎 阅读与检索
 
@@ -193,7 +200,13 @@ npx playwright install chromium
 npm run test:browser
 ```
 
-Linux 如缺少 Chromium 运行库，可按 Playwright 的提示安装系统依赖（`npx playwright install-deps chromium`）。每个浏览器测试使用独立的临时归档目录、动态端口、浏览器存储和合成示例，覆盖上传落盘、命令行复制后刷新、缓存恢复、内容去重、按需读取、目录更新与存储失败，不修改真实导出文件；用户提供的示例存在时，也会验证其 40 条记录的解析与展示。
+Mac 上已安装 Google Chrome 时，也可以复用本机浏览器，无需下载 Playwright 的 Chromium：
+
+```bash
+PLAYWRIGHT_CHANNEL=chrome npm run test:browser
+```
+
+WSL 如缺少 Chromium 运行库，可按 Playwright 的提示安装系统依赖（`npx playwright install-deps chromium`）。macOS 直接安装上述 Chromium 即可。`npm test` 在两个平台均可运行，服务管理测试覆盖含中文和空格的目录、目录符号链接、时区变化、并发启动、端口冲突、前台进程识别和过期 PID 保护；WSL 还会验证旧进程记录兼容性。每个浏览器测试使用独立的临时归档目录、动态端口、浏览器存储和合成示例，覆盖上传落盘、命令行复制后刷新、缓存恢复、内容去重、按需读取、目录更新与存储失败，不修改真实导出文件；用户提供的示例存在时，也会验证其 40 条记录的解析与展示。
 
 ## ❓ 常见问题
 
@@ -223,6 +236,8 @@ src/theme-picker.js  主题列表、缩略图菜单、键盘选择与主题偏�
 src/styles.css       响应式界面与浅色、深色、暮色主题
 public/              页面入口与本地构建产物
 scripts/             start.sh / stop.sh / status.sh 服务管理，以及构建和开发脚本
+scripts/control.sh   WSL / macOS 平台识别与服务操作互斥
+scripts/process-identity.mjs 跨平台进程身份校验
 sessions/            按天保存的会话文件，today.sh 创建并返回当天目录名
 docs/images/         README 中的真实界面截图，内容来自合成示例
 tests/               解析/服务测试、浏览器交互测试

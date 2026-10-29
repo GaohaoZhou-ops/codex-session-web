@@ -1,6 +1,8 @@
 # Dependencies and generated frontend assets.
 node_modules/
 /public/assets/
+# Local npm pack output; archive fixtures in subdirectories remain trackable.
+/*.tgz
 
 # Local service state, caches, and logs.
 /.run/
@@ -62,18 +64,13 @@ rollout-*.[jJ][sS][oO][nN][lL]
 !/tests/fixtures/**/codex-session-*.[jJ][sS][oO][nN][lL]
 !/tests/fixtures/**/rollout-*.[jJ][sS][oO][nN][lL]
 
-# Editor, OS, and temporary files.
+# Editor and temporary files.
 /tmp/
 /temp/
 /.tmp/
 .idea/
 .vscode/
 .history/
-.DS_Store
-._*
-Thumbs.db
-Desktop.ini
-*:Zone.Identifier*
 *.swp
 *.swo
 *.swn
@@ -83,3 +80,23 @@ Desktop.ini
 *.bak
 *.orig
 *.rej
+
+# macOS Finder metadata, resource forks, and extracted archive metadata.
+.DS_Store
+.AppleDouble/
+.LSOverride
+._*
+__MACOSX/
+.Spotlight-V100/
+.Trashes/
+.fseventsd/
+.TemporaryItems/
+
+# Windows metadata that can accompany files copied to WSL or macOS.
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*:Zone.Identifier*

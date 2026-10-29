@@ -360,6 +360,7 @@ test('delete confirmation names the selected file and cancelling preserves its c
   await page.locator('.session-item[title="codex-session-demo.md"]').click();
   await expect(page.locator('.conversation-filename')).toContainText('codex-session-demo.md');
   await page.locator('.session-item[title="cached.md"]').click();
+  await expect(page.locator('.conversation-filename')).toHaveText('cached.md');
   await page.getByRole('searchbox').fill('恢复');
   await expect(page.locator('#search-count')).toHaveText('1 / 2 条');
   const before = await cacheSummary(page);

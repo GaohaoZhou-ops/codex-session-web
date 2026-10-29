@@ -230,7 +230,7 @@ test('remembers appearance and supports keyboard search', async ({ page }) => {
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
-  await page.keyboard.press('Control+k');
+  await page.keyboard.press('ControlOrMeta+k');
   await expect(page.getByRole('searchbox')).toBeFocused();
 });
 

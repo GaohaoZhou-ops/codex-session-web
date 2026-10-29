@@ -6,6 +6,9 @@ export default defineConfig({
   fullyParallel: true,
   workers: 2,
   timeout: 30000,
-  use: { viewport: { width: 1440, height: 1000 }, screenshot: 'only-on-failure', trace: 'retain-on-failure' },
+  use: {
+    viewport: { width: 1440, height: 1000 }, screenshot: 'only-on-failure', trace: 'retain-on-failure',
+    channel: process.env.PLAYWRIGHT_CHANNEL || undefined,
+  },
   globalSetup: './tests/browser/setup.mjs',
 });

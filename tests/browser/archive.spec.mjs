@@ -36,6 +36,7 @@ test('existing batch import saves raw bytes and is readable from a browser with 
     await other.goto('/');
     await expect(other.locator('#session-count')).toHaveText('3');
     await other.locator('.session-item[title="archived.md"]').click();
+    await expect(other.locator('.conversation-filename')).toHaveText('archived.md');
     await expect(other.locator('.message-assistant')).toContainText('归档回答');
     await other.locator('.session-item[title="headerless.txt"]').click();
     await expect(other.locator('.message-assistant')).toContainText('从磁盘恢复');
@@ -54,6 +55,7 @@ test('files copied into the script-created directory appear through the existing
   await page.getByRole('button', { name: '刷新文件列表' }).click();
   await expect(page.locator('.session-item[title="cli-copy.md"]')).toHaveCount(1);
   await page.locator('.session-item[title="cli-copy.md"]').click();
+  await expect(page.locator('.conversation-filename')).toHaveText('cli-copy.md');
   await expect(page.locator('.message-assistant')).toContainText('归档回答');
   const updated = Buffer.from('## User\n命令行覆盖\n## Assistant\n复制后的新内容');
   await writeFile(path.join(archive, stdout.trim(), 'cli-copy.md'), updated);
